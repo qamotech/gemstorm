@@ -198,7 +198,7 @@ cv.addEventListener('touchend', endTouch); cv.addEventListener('touchcancel', en
 /* ---------------- game state ---------------- */
 let state = 'menu'; // menu | play | draft | pause | over | win
 let time = 0, lastTs = 0;
-let enemies = [], projs = [], gems = [], parts = [], texts = [], rings = [], pools = [], hearts = [];
+let enemies = [], projs = [], gems = [], parts = [], texts = [], rings = [], pools = [], hearts = [], ghosts = [];
 let P = null, wave = 0, score = 0, kills = 0, gemsRun = 0, runTime = 0;
 let spawnLeft = 0, spawnTimer = 0, waveState = 'intro', waveT = 0, bossRef = null, bossWave = false, bossSpawned = false, gemsBanked = false;
 let shake = 0, hitstop = 0, draftChoices = [], endless = false, victoryBanked = false;
@@ -365,6 +365,8 @@ function update(dt) {
   texts = texts.filter(t => t.life > 0);
   for (const r of rings) { r.r += 190 * dt; r.life -= dt; }
   rings = rings.filter(r => r.life > 0);
+  for (const g of ghosts) g.life -= dt;
+  ghosts = ghosts.filter(g => g.life > 0);
   if (state !== 'play') return;
   if (hitstop > 0) { hitstop -= dt; return; }
   runTime += dt;
@@ -385,7 +387,11 @@ function update(dt) {
   if (touchMode && aim.on && hyp(aim.dx, aim.dy) > 0.12) P.aim = atan2(aim.dy, aim.dx);
   else if (!touchMode) P.aim = atan2(mouseY - P.y, mouseX - P.x);
   else if (mm > 0.12) P.aim = P.face;
-  if (P.dashT > 0) P.dashT -= dt;
+  if (P.dashT > 0) {
+    P.dashT -= dt;
+    ghosts.push({ x: P.x, y: P.y, aim: P.aim, col: P.col, life: 0.26, max: 0.26 });
+    if (ghosts.length > 16) ghosts.shift();
+  }
   if (P.hurtT > 0) P.hurtT -= dt;
   P.dashCd += dt; if (P.dashCd >= 2.2 && P.dashCh < P.dashMax) { P.dashCh++; P.dashCd = 0; }
   P.rocketCd += dt; if (P.rocketCd >= 2.2 && P.rocketCh < P.rocketMax) { P.rocketCh++; P.rocketCd = 0; }
@@ -541,29 +547,73 @@ function heartPath(x, y, r) {
   ctx.closePath();
 }
 function drawHeart(x, y, r, col) { heartPath(x, y, r); ctx.fillStyle = col; ctx.fill(); }
-function poly(x, y, r, n, rot, col) {
+function polyPath(x, y, r, n, rot) {
   ctx.beginPath();
   for (let i = 0; i < n; i++) { const a = rot + TAU * i / n; const px = x + cos(a) * r, py = y + sin(a) * r; i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
-  ctx.closePath(); ctx.fillStyle = col; ctx.fill();
+  ctx.closePath();
 }
-function drawTurtle(x, y, r, col, aimA, t, dashing) {
-  // jets (behind, opposite the aim)
-  for (const s of [-1, 1]) {
-    const ja = aimA + Math.PI + s * 0.5;
-    const jx = x + cos(ja) * r * 0.95, jy = y + sin(ja) * r * 0.95;
-    const fl = r * (0.75 + 0.3 * sin(t * 31 + s * 2)) * (dashing ? 1.7 : 1);
-    poly(jx + cos(ja) * fl * 0.5, jy + sin(ja) * fl * 0.5, fl * 0.42, 3, ja, '#fb923c');
-    poly(jx + cos(ja) * fl * 0.3, jy + sin(ja) * fl * 0.3, fl * 0.22, 3, ja, '#fef08a');
+function poly(x, y, r, n, rot, col) { polyPath(x, y, r, n, rot); ctx.fillStyle = col; ctx.fill(); }
+/* v1.2 detail pass: gradient shell with plates + rim scutes, paddling flippers,
+   metal jet nozzles with 3-layer flames, blaster nub, glossy head with glint eye. */
+function drawTurtle(x, y, r, col, aimA, t, dashing, detail) {
+  if (detail === undefined) detail = true;
+  // soft drop shadow
+  ctx.beginPath(); ctx.ellipse(x, y + r * 0.94, r * 0.95, r * 0.3, 0, 0, TAU);
+  ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fill();
+  // flippers, paddling
+  const pad = sin(t * 6) * 0.35;
+  for (const [fx, fy, s] of [[-0.84, -0.52, 1], [0.84, -0.52, -1], [-0.86, 0.58, 1], [0.86, 0.58, -1]]) {
+    ctx.save(); ctx.translate(x + fx * r, y + fy * r); ctx.rotate(pad * s + fx * 0.45);
+    ctx.beginPath(); ctx.ellipse(0, 0, r * 0.34, r * 0.16, 0, 0, TAU);
+    ctx.fillStyle = shade(col, 0.6); ctx.fill(); ctx.restore();
   }
-  // shell
-  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fillStyle = shade(col, 0.55); ctx.fill();
-  ctx.beginPath(); ctx.arc(x, y, r * 0.78, 0, TAU); ctx.fillStyle = col; ctx.fill();
-  ctx.beginPath(); ctx.arc(x, y, r * 0.45, 0, TAU); ctx.fillStyle = shade(col, 1.25); ctx.fill();
-  poly(x, y, r * 0.2, 4, t * 1.5, '#ffffff');
-  // head
-  const hx = x + cos(aimA) * r * 0.92, hy = y + sin(aimA) * r * 0.92;
-  ctx.beginPath(); ctx.arc(hx, hy, r * 0.34, 0, TAU); ctx.fillStyle = shade(col, 0.8); ctx.fill();
-  ctx.beginPath(); ctx.arc(hx + cos(aimA) * r * 0.12, hy + sin(aimA) * r * 0.12, r * 0.09, 0, TAU); ctx.fillStyle = '#0f172a'; ctx.fill();
+  // jets: 3-layer flame + metal nozzle
+  for (const s of [-1, 1]) {
+    const ja = aimA + Math.PI + s * 0.52;
+    const jx = x + cos(ja) * r * 0.98, jy = y + sin(ja) * r * 0.98;
+    const fl = r * (0.8 + 0.3 * sin(t * 31 + s * 2)) * (dashing ? 1.8 : 1);
+    poly(jx + cos(ja) * fl * 0.55, jy + sin(ja) * fl * 0.55, fl * 0.46, 3, ja, '#f97316');
+    poly(jx + cos(ja) * fl * 0.38, jy + sin(ja) * fl * 0.38, fl * 0.3, 3, ja, '#facc15');
+    poly(jx + cos(ja) * fl * 0.22, jy + sin(ja) * fl * 0.22, fl * 0.16, 3, ja, '#ffffff');
+    ctx.beginPath(); ctx.arc(jx, jy, r * 0.17, 0, TAU); ctx.fillStyle = '#475569'; ctx.fill();
+    ctx.beginPath(); ctx.arc(jx, jy, r * 0.1, 0, TAU); ctx.fillStyle = '#1e293b'; ctx.fill();
+  }
+  // shell: radial gradient with a neon rim glow
+  if (detail) { ctx.save(); ctx.shadowColor = col; ctx.shadowBlur = 16; }
+  const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.15, x, y, r);
+  g.addColorStop(0, shade(col, 1.3)); g.addColorStop(0.55, col); g.addColorStop(1, shade(col, 0.45));
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fillStyle = g; ctx.fill();
+  if (detail) ctx.restore();
+  // rim ring + scute ticks
+  ctx.beginPath(); ctx.arc(x, y, r * 0.96, 0, TAU); ctx.strokeStyle = shade(col, 0.5); ctx.lineWidth = r * 0.09; ctx.stroke();
+  ctx.strokeStyle = 'rgba(0,0,0,0.28)'; ctx.lineWidth = 1.4; ctx.beginPath();
+  for (let i = 0; i < 12; i++) { const a = TAU * i / 12 + 0.13; ctx.moveTo(x + cos(a) * r * 0.88, y + sin(a) * r * 0.88); ctx.lineTo(x + cos(a) * r * 1.0, y + sin(a) * r * 1.0); }
+  ctx.stroke();
+  // shell plates: six around a center plate, turning slowly together
+  for (let i = 0; i < 6; i++) {
+    const a = TAU * i / 6 + t * 0.05;
+    const px = x + cos(a) * r * 0.52, py = y + sin(a) * r * 0.52;
+    ctx.beginPath(); ctx.arc(px, py, r * 0.29, 0, TAU); ctx.fillStyle = shade(col, 0.88); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1.4; ctx.stroke();
+  }
+  poly(x, y, r * 0.33, 6, t * 0.05, shade(col, 1.12));
+  // center gem
+  poly(x, y, r * 0.17, 4, t * 1.5, '#ffffff');
+  poly(x, y, r * 0.1, 4, t * 1.5, col);
+  // specular sheen
+  if (detail) { ctx.beginPath(); ctx.ellipse(x - r * 0.38, y - r * 0.48, r * 0.34, r * 0.15, -0.6, 0, TAU); ctx.fillStyle = 'rgba(255,255,255,0.20)'; ctx.fill(); }
+  // blaster nub on the aim side
+  const bx = x + cos(aimA) * r, by = y + sin(aimA) * r;
+  ctx.beginPath(); ctx.arc(bx, by, r * 0.16, 0, TAU); ctx.fillStyle = '#334155'; ctx.fill();
+  ctx.beginPath(); ctx.arc(bx + cos(aimA) * r * 0.08, by + sin(aimA) * r * 0.08, r * 0.07, 0, TAU); ctx.fillStyle = col; ctx.fill();
+  // head: gradient dome, eye with a glint
+  const hx = x + cos(aimA) * r * 0.95, hy = y + sin(aimA) * r * 0.95;
+  const hg = ctx.createRadialGradient(hx - r * 0.1, hy - r * 0.12, r * 0.05, hx, hy, r * 0.36);
+  hg.addColorStop(0, shade(col, 1.2)); hg.addColorStop(1, shade(col, 0.7));
+  ctx.beginPath(); ctx.arc(hx, hy, r * 0.35, 0, TAU); ctx.fillStyle = hg; ctx.fill();
+  const ex = hx + cos(aimA) * r * 0.13, ey = hy + sin(aimA) * r * 0.13;
+  ctx.beginPath(); ctx.arc(ex, ey, r * 0.1, 0, TAU); ctx.fillStyle = '#0f172a'; ctx.fill();
+  ctx.beginPath(); ctx.arc(ex - r * 0.03, ey - r * 0.03, r * 0.035, 0, TAU); ctx.fillStyle = '#ffffff'; ctx.fill();
 }
 function drawBackground() {
   ctx.fillStyle = '#0a0618'; ctx.fillRect(0, 0, W, H);
@@ -580,18 +630,36 @@ function drawBackground() {
   ctx.stroke();
   for (const s of stars) {
     ctx.globalAlpha = 0.35 + 0.3 * sin(time * 2 + s.p);
-    ctx.fillStyle = '#e2e8f0'; ctx.fillRect(s.x * W, s.y * H, s.r, s.r);
+    ctx.fillStyle = '#e2e8f0';
+    const sx = ((s.x + time * 0.0035 * s.r) % 1) * W; // slow parallax drift, deeper = slower
+    ctx.fillRect(sx, s.y * H, s.r, s.r);
   }
   ctx.globalAlpha = 1;
 }
 function drawEnemy(e) {
   const t = time * 3 + e.wob;
-  if (e.elite) { ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 5 + 2 * sin(t), 0, TAU); ctx.strokeStyle = '#facc15'; ctx.lineWidth = 2.5; ctx.stroke(); }
+  if (e.elite) {
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 5 + 2 * sin(t), 0, TAU); ctx.strokeStyle = '#facc15'; ctx.lineWidth = 2.5; ctx.stroke();
+    ctx.save(); ctx.setLineDash([7, 9]); ctx.lineDashOffset = -time * 26;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 10, 0, TAU); ctx.strokeStyle = 'rgba(250,204,21,0.55)'; ctx.lineWidth = 1.5; ctx.stroke(); ctx.restore();
+  }
   if (e.chill > 0) { ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 2, 0, TAU); ctx.fillStyle = 'rgba(165,243,252,0.25)'; ctx.fill(); }
   const n = { chaser: 3, dart: 4, brute: 6, splitter: 4, mini: 3, boss: 5 }[e.type];
-  poly(e.x, e.y, e.r, n, t * 0.4, shade(e.col, 0.75));
-  poly(e.x, e.y, e.r * 0.62, n, -t * 0.3, e.col);
-  ctx.beginPath(); ctx.arc(e.x, e.y, e.r * 0.2, 0, TAU); ctx.fillStyle = '#fff'; ctx.fill();
+  // rim spikes on the heavies
+  if (e.type === 'brute' || e.type === 'boss') {
+    const spikes = e.type === 'boss' ? 10 : 8;
+    for (let i = 0; i < spikes; i++) { const a = TAU * i / spikes + t * 0.06; poly(e.x + cos(a) * e.r * 1.04, e.y + sin(a) * e.r * 1.04, e.r * 0.22, 3, a, shade(e.col, 0.55)); }
+  }
+  // gradient body + inner counter-rotating core
+  const g = ctx.createRadialGradient(e.x - e.r * 0.3, e.y - e.r * 0.32, e.r * 0.1, e.x, e.y, e.r);
+  g.addColorStop(0, shade(e.col, 1.3)); g.addColorStop(1, shade(e.col, 0.55));
+  polyPath(e.x, e.y, e.r, n, t * 0.4); ctx.fillStyle = g; ctx.fill();
+  poly(e.x, e.y, e.r * 0.62, n, -t * 0.3, shade(e.col, 0.85));
+  // eye that tracks the player
+  const ea = P ? atan2(P.y - e.y, P.x - e.x) : 0;
+  const ex = e.x + cos(ea) * e.r * 0.16, ey = e.y + sin(ea) * e.r * 0.16;
+  ctx.beginPath(); ctx.arc(ex, ey, e.r * 0.2, 0, TAU); ctx.fillStyle = '#ffffff'; ctx.fill();
+  ctx.beginPath(); ctx.arc(ex + cos(ea) * e.r * 0.07, ey + sin(ea) * e.r * 0.07, e.r * 0.1, 0, TAU); ctx.fillStyle = '#0f172a'; ctx.fill();
   if (e.type === 'boss' || e.type === 'brute') {
     rr(e.x - e.r, e.y - e.r - 12, e.r * 2, 5, 2.5, '#1e293b');
     rr(e.x - e.r, e.y - e.r - 12, e.r * 2 * clamp(e.hp / e.maxHp, 0, 1), 5, 2.5, e.type === 'boss' ? '#e879f9' : '#fb923c');
@@ -605,9 +673,20 @@ function drawPlay() {
     ctx.beginPath(); ctx.arc(pl.x, pl.y, pl.r * 0.45, 0, TAU); ctx.fillStyle = '#fef08a'; ctx.fill();
     ctx.globalAlpha = 1;
   }
-  for (const g of gems) poly(g.x, g.y + sin(g.t) * 2, 6, 4, time * 2 + g.t, '#34d399');
-  for (const h of hearts) drawHeart(h.x, h.y + sin(h.t) * 3, 10 + sin(h.t) * 1.5, '#ef4444');
+  for (const gm of gems) {
+    const gy = gm.y + sin(gm.t) * 2;
+    ctx.save(); ctx.shadowColor = '#34d399'; ctx.shadowBlur = 11;
+    poly(gm.x, gy, 6.5, 4, time * 2 + gm.t, '#34d399'); ctx.restore();
+    poly(gm.x, gy, 3, 4, time * 2 + gm.t, '#d1fae5');
+  }
+  for (const h of hearts) {
+    ctx.save(); ctx.shadowColor = '#ef4444'; ctx.shadowBlur = 12;
+    drawHeart(h.x, h.y + sin(h.t) * 3, 10 + sin(h.t) * 1.5, '#ef4444'); ctx.restore();
+    ctx.beginPath(); ctx.arc(h.x - 3.5, h.y - 3.5 + sin(h.t) * 3, 2.2, 0, TAU); ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.fill();
+  }
   for (const e of enemies) drawEnemy(e);
+  // projectiles + particles render additively so overlapping fire glows
+  ctx.globalCompositeOperation = 'lighter';
   for (const pr of projs) {
     if (pr.rocket) {
       const a = atan2(pr.vy, pr.vx);
@@ -615,12 +694,14 @@ function drawPlay() {
       poly(pr.x - cos(a) * 8, pr.y - sin(a) * 8, 5.5, 3, a + Math.PI, '#fef08a');
       ctx.beginPath(); ctx.arc(pr.x + cos(a) * 6, pr.y + sin(a) * 6, 3, 0, TAU); ctx.fillStyle = '#fff'; ctx.fill();
     } else {
-      ctx.beginPath(); ctx.arc(pr.x, pr.y, pr.r, 0, TAU); ctx.fillStyle = pr.col; ctx.fill();
+      ctx.save(); ctx.shadowColor = pr.col; ctx.shadowBlur = 9;
+      ctx.beginPath(); ctx.arc(pr.x, pr.y, pr.r, 0, TAU); ctx.fillStyle = pr.col; ctx.fill(); ctx.restore();
       ctx.beginPath(); ctx.arc(pr.x, pr.y, pr.r * 0.45, 0, TAU); ctx.fillStyle = '#fff'; ctx.fill();
     }
   }
   for (const p of parts) { ctx.globalAlpha = clamp(p.life / p.max, 0, 1); ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fillStyle = p.col; ctx.fill(); }
   ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
   for (const r of rings) { ctx.globalAlpha = clamp(r.life / r.max, 0, 1); ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, TAU); ctx.strokeStyle = r.col; ctx.lineWidth = 2.5; ctx.stroke(); }
   ctx.globalAlpha = 1;
   // aim guide dots (#803 in the Android edition)
@@ -629,6 +710,9 @@ function drawPlay() {
     ctx.arc(P.x + cos(P.aim) * (34 + k * 16), P.y + sin(P.aim) * (34 + k * 16), 3 - k * 0.5, 0, TAU);
     ctx.fillStyle = P.col; ctx.fill();
   }
+  ctx.globalAlpha = 1;
+  // dash afterimages — fading turtle silhouettes
+  for (const gh of ghosts) { ctx.globalAlpha = 0.32 * (gh.life / gh.max); drawTurtle(gh.x, gh.y, P.r * 0.96, gh.col, gh.aim, time, false, false); }
   ctx.globalAlpha = 1;
   if (!(P.dashT > 0 && (time * 20 | 0) % 2)) drawTurtle(P.x, P.y, P.r, P.col, P.aim, time, P.dashT > 0);
   if (P.hurtT > 0) { ctx.beginPath(); ctx.arc(P.x, P.y, P.r + 6, 0, TAU); ctx.strokeStyle = 'rgba(248,113,113,0.7)'; ctx.lineWidth = 2; ctx.stroke(); }
@@ -645,10 +729,12 @@ function drawHUD() {
   const m = 14, barW = Math.min(300, W * 0.36);
   rr(m, m, barW, 16, 7, '#14532d');
   rr(m, m, barW * clamp(P.hp / P.maxHp, 0, 1), 16, 7, '#22c55e');
+  rr(m, m, barW * clamp(P.hp / P.maxHp, 0, 1), 6.5, 3, 'rgba(255,255,255,0.22)');
   txt(`HP ${Math.ceil(P.hp)}/${P.maxHp}`, m + 7, m + 12.5, 11, '#fff', 'left', true);
   const xpY = m + 22;
   rr(m, xpY, barW, 9, 4, '#2e1065');
   rr(m, xpY, barW * clamp(P.xp / P.xpNext, 0, 1), 9, 4, '#34d399');
+  rr(m, xpY, barW * clamp(P.xp / P.xpNext, 0, 1), 3.5, 1.5, 'rgba(255,255,255,0.22)');
   txt(`LV ${P.level}`, m + barW + 8, xpY + 9, 12, '#34d399', 'left', true);
   txt(`${P.xp}/${P.xpNext}`, m + barW - 4, xpY + 8, 9, '#fff', 'right');
   txt(endless ? `WAVE ${wave} ∞` : `WAVE ${wave}/${MAX_WAVE}`, W / 2, m + 16, 15, endless ? '#facc15' : '#e9d5ff', 'center', true);
@@ -730,18 +816,18 @@ function drawMenu() {
       persist();
     });
   });
-  // toggles
-  const ty = 562;
-  rr(cx - 230, ty, 148, 34, 9, save.hard ? '#7f1d1d' : '#1e293b');
-  txt(`☠️ Hard: ${save.hard ? 'ON' : 'OFF'}`, cx - 156, ty + 22, 12.5, '#fff', 'center', true);
-  regBtn(cx - 230, ty, 148, 34, () => { save.hard = !save.hard; persist(); });
-  rr(cx - 74, ty, 148, 34, 9, '#1e293b');
-  txt(`🔊 Sound: ${save.mute ? 'OFF' : 'ON'}`, cx, ty + 22, 12.5, '#fff', 'center', true);
-  regBtn(cx - 74, ty, 148, 34, () => { save.mute = !save.mute; if (master) master.gain.value = save.mute ? 0 : 0.5; persist(); });
-  rr(cx + 82, ty, 148, 34, 9, '#1e293b');
-  txt('⛶ Fullscreen (F)', cx + 156, ty + 22, 12.5, '#fff', 'center', true);
-  regBtn(cx + 82, ty, 148, 34, () => toggleFullscreen());
-  txt('Web Edition v1.1 — the core Abyss in your browser · manual aim · harder defaults', cx, H - 26, 11, '#64748b', 'center');
+  // toggles (width adapts so the row never clips on narrow windows)
+  const ty = 562, chw = Math.min(148, (W - 64) / 3), chGap = 8, tx0 = cx - (chw * 3 + chGap * 2) / 2;
+  rr(tx0, ty, chw, 34, 9, save.hard ? '#7f1d1d' : '#1e293b');
+  txt(`☠️ Hard: ${save.hard ? 'ON' : 'OFF'}`, tx0 + chw / 2, ty + 22, 12, '#fff', 'center', true);
+  regBtn(tx0, ty, chw, 34, () => { save.hard = !save.hard; persist(); });
+  rr(tx0 + chw + chGap, ty, chw, 34, 9, '#1e293b');
+  txt(`🔊 Sound: ${save.mute ? 'OFF' : 'ON'}`, tx0 + chw * 1.5 + chGap, ty + 22, 12, '#fff', 'center', true);
+  regBtn(tx0 + chw + chGap, ty, chw, 34, () => { save.mute = !save.mute; if (master) master.gain.value = save.mute ? 0 : 0.5; persist(); });
+  rr(tx0 + (chw + chGap) * 2, ty, chw, 34, 9, '#1e293b');
+  txt('⛶ Fullscreen (F)', tx0 + chw * 2.5 + chGap * 2, ty + 22, 12, '#fff', 'center', true);
+  regBtn(tx0 + (chw + chGap) * 2, ty, chw, 34, () => toggleFullscreen());
+  txt('Web Edition v1.2 — the core Abyss in your browser · manual aim · harder defaults', cx, H - 26, 11, '#64748b', 'center');
   for (const t of texts) { ctx.globalAlpha = clamp(t.life / t.max, 0, 1); txt(t.str, t.x, t.y, t.size, t.col, 'center', true); }
   ctx.globalAlpha = 1;
 }
@@ -792,6 +878,10 @@ function draw() {
     if (state === 'win') drawEnd(true);
   }
   ctx.restore();
+  // cinematic vignette over everything
+  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.42, W / 2, H / 2, Math.max(W, H) * 0.78);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(2,0,10,0.48)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
 }
 /* ---------------- main loop (with the v2.7 frame safety net) ---------------- */
 function loop(ts) {
