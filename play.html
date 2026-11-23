@@ -8,7 +8,7 @@
   html, body { margin:0; padding:0; background:#07040f; overflow:hidden; height:100%;
     font-family:'Segoe UI', system-ui, -apple-system, sans-serif; color:#e2e8f0;
     -webkit-user-select:none; user-select:none; touch-action:none; }
-  #game { position:fixed; inset:0; display:block; }
+  #game { position:fixed; inset:0; display:block; cursor:crosshair; }
   #hint { position:fixed; left:50%; bottom:8px; transform:translateX(-50%); font-size:12px;
     color:#64748b; letter-spacing:.4px; pointer-events:none; text-align:center; white-space:nowrap; }
   #hint b { color:#94a3b8; }
@@ -342,6 +342,7 @@ function doRocket() {
 }
 function endRun(won) {
   state = won ? 'win' : 'over';
+  shake = 0;
   if (won && !victoryBanked) { victoryBanked = true; save.victories++; }
   if (!gemsBanked) { gemsBanked = true; save.bank += gemsRun; save.kills += kills; }
   if (score > save.best) save.best = score;
@@ -354,6 +355,8 @@ function resumeGame() { if (state === 'pause') state = 'play'; }
 /* ---------------- update ---------------- */
 function update(dt) {
   time += dt;
+  // shake decays on EVERY screen (v1.1 fix: it used to freeze mid-shake on the death screen)
+  if (shake > 0) shake = Math.max(0, shake - 30 * dt);
   musicTick(dt, !!bossRef);
   // particles / texts / rings always drift
   for (const p of parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
@@ -503,7 +506,6 @@ function update(dt) {
     if (hyp(h.x - P.x, h.y - P.y) < 28) { h.got = true; heal(15); sfx.heart(); addText(P.x, P.y - 30, '+15 HP', '#f87171', 15, 0.9); }
   }
   hearts = hearts.filter(h => !h.got);
-  if (shake > 0) shake = Math.max(0, shake - 30 * dt);
 }
 function bossBurst(e, n) {
   for (let i = 0; i < n; i++) {
@@ -730,13 +732,16 @@ function drawMenu() {
   });
   // toggles
   const ty = 562;
-  rr(cx - 152, ty, 148, 34, 9, save.hard ? '#7f1d1d' : '#1e293b');
-  txt(`☠️ Hard: ${save.hard ? 'ON' : 'OFF'}`, cx - 78, ty + 22, 12.5, '#fff', 'center', true);
-  regBtn(cx - 152, ty, 148, 34, () => { save.hard = !save.hard; persist(); });
-  rr(cx + 4, ty, 148, 34, 9, '#1e293b');
-  txt(`🔊 Sound: ${save.mute ? 'OFF' : 'ON'}`, cx + 78, ty + 22, 12.5, '#fff', 'center', true);
-  regBtn(cx + 4, ty, 148, 34, () => { save.mute = !save.mute; if (master) master.gain.value = save.mute ? 0 : 0.5; persist(); });
-  txt('Web Edition v1.0 — the core Abyss in your browser · manual aim · harder defaults', cx, H - 26, 11, '#64748b', 'center');
+  rr(cx - 230, ty, 148, 34, 9, save.hard ? '#7f1d1d' : '#1e293b');
+  txt(`☠️ Hard: ${save.hard ? 'ON' : 'OFF'}`, cx - 156, ty + 22, 12.5, '#fff', 'center', true);
+  regBtn(cx - 230, ty, 148, 34, () => { save.hard = !save.hard; persist(); });
+  rr(cx - 74, ty, 148, 34, 9, '#1e293b');
+  txt(`🔊 Sound: ${save.mute ? 'OFF' : 'ON'}`, cx, ty + 22, 12.5, '#fff', 'center', true);
+  regBtn(cx - 74, ty, 148, 34, () => { save.mute = !save.mute; if (master) master.gain.value = save.mute ? 0 : 0.5; persist(); });
+  rr(cx + 82, ty, 148, 34, 9, '#1e293b');
+  txt('⛶ Fullscreen (F)', cx + 156, ty + 22, 12.5, '#fff', 'center', true);
+  regBtn(cx + 82, ty, 148, 34, () => toggleFullscreen());
+  txt('Web Edition v1.1 — the core Abyss in your browser · manual aim · harder defaults', cx, H - 26, 11, '#64748b', 'center');
   for (const t of texts) { ctx.globalAlpha = clamp(t.life / t.max, 0, 1); txt(t.str, t.x, t.y, t.size, t.col, 'center', true); }
   ctx.globalAlpha = 1;
 }
@@ -763,7 +768,7 @@ function drawEnd(won) {
   txt(`💎 +${gemsRun} banked (total ${save.bank}) · Best combo ×${P.comboBest}`, W / 2, H * 0.3 + 64, 13, '#94a3b8', 'center');
   const cx = W / 2, y = H * 0.48;
   if (won) bigButton(cx - 150, y, 300, 50, '🌊 KEEP GOING — ENDLESS', '#7c3aed', () => { endless = true; state = 'play'; nextWave(); });
-  bigButton(cx - 150, y + (won ? 62 : 0), 300, 50, '▶  PLAY AGAIN', '#16a34a', () => startRun());
+  bigButton(cx - 150, y + (won ? 62 : 0), 300, 50, '▶  PLAY AGAIN  (R)', '#16a34a', () => startRun());
   bigButton(cx - 150, y + (won ? 124 : 62), 300, 50, '🏠  MENU', '#334155', () => { state = 'menu'; });
 }
 function drawPause() {
@@ -775,7 +780,7 @@ function drawPause() {
 function draw() {
   btns = [];
   ctx.save();
-  if (shake > 0) ctx.translate(rnd(-shake, shake) * 0.5, rnd(-shake, shake) * 0.5);
+  if (shake > 0 && state === 'play') ctx.translate(rnd(-shake, shake) * 0.5, rnd(-shake, shake) * 0.5);
   drawBackground();
   if (state === 'menu') drawMenu();
   else {
@@ -797,14 +802,27 @@ function loop(ts) {
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else document.documentElement.requestFullscreen().catch(() => {});
+}
 addEventListener('keydown', e => {
   if (state === 'draft') {
     const n = parseInt(e.key, 10);
     if (n >= 1 && n <= 3 && draftChoices[n - 1]) applyUpgrade(draftChoices[n - 1]);
   } else if (state === 'menu' && e.key === 'Enter') startRun();
-  else if ((state === 'over' || state === 'win') && e.key === 'Enter') startRun();
+  else if ((state === 'over' || state === 'win') && (e.key === 'Enter' || e.key.toLowerCase() === 'r')) startRun();
   if (e.key.toLowerCase() === 'm') { save.mute = !save.mute; if (master) master.gain.value = save.mute ? 0 : 0.5; persist(); }
+  if (e.key.toLowerCase() === 'f') toggleFullscreen();
 });
+// PC safety: alt-tab / window blur mid-run used to leave movement keys stuck down.
+// Now it clears the keys and auto-pauses instead.
+function pcFocusLost() {
+  for (const k in keys) delete keys[k];
+  if (state === 'play') pauseGame();
+}
+addEventListener('blur', pcFocusLost);
+document.addEventListener('visibilitychange', () => { if (document.hidden) pcFocusLost(); });
 </script>
 </body>
 </html>
