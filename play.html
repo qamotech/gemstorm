@@ -26,10 +26,10 @@
    drafts, straight-line rockets (v2.6.2 rules), harder defaults —
    manual aim, hard mode ON (v2.7.0 rules). Zero dependencies.
    ============================================================ */
-const cv = document.getElementById('game'), ctx = cv.getContext('2d');
+const cv = document.getElementById('game'), ctx = cv.getContext('2d', { alpha: false, desynchronized: true });
 let W = 0, H = 0, DPR = 1;
 function resize() {
-  DPR = Math.min(2, window.devicePixelRatio || 1);
+  DPR = Math.min(matchMedia('(pointer: coarse)').matches ? 1.5 : 2, window.devicePixelRatio || 1);
   W = window.innerWidth; H = window.innerHeight;
   cv.width = Math.floor(W * DPR); cv.height = Math.floor(H * DPR);
   cv.style.width = W + 'px'; cv.style.height = H + 'px';
@@ -41,6 +41,7 @@ const TAU = Math.PI * 2;
 const hyp = Math.hypot, atan2 = Math.atan2, cos = Math.cos, sin = Math.sin;
 const rnd = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+const fmtT = s => `${(s / 60) | 0}:${('' + ((s | 0) % 60)).padStart(2, '0')}`;
 const shade = (hex, f) => {
   const n = parseInt(hex.slice(1), 16);
   const r = clamp(((n >> 16) & 255) * f, 0, 255) | 0, g = clamp(((n >> 8) & 255) * f, 0, 255) | 0, b = clamp((n & 255) * f, 0, 255) | 0;
@@ -50,7 +51,7 @@ const shade = (hex, f) => {
 /* ---------------- save (localStorage) ---------------- */
 const SKEY = 'gemstorm_web_save_v1';
 let save = { bank: 0, best: 0, bestWave: 0, victories: 0, kills: 0,
-  unlocks: 1, hero: 0, weapon: 0, wunlocks: 1, hard: true, mute: false, shake: true };
+  unlocks: 1, hero: 0, weapon: 0, wunlocks: 1, hard: true, mute: false, shake: true, fx: true, bestCombo: 0 };
 try { const s = JSON.parse(localStorage.getItem(SKEY) || 'null'); if (s && typeof s === 'object') save = Object.assign(save, s); } catch (e) { /* fresh save */ }
 function persist() { try { localStorage.setItem(SKEY, JSON.stringify(save)); } catch (e) { /* private mode */ } }
 
@@ -61,7 +62,7 @@ const HEROES = [
   { name: 'Bulwark',     col: '#fb923c', hp: 170, spd: 0.92, cost: 900,  desc: 'A tank with a turtle heart' },
   { name: 'Pyro',        col: '#f87171', hp: 110, spd: 1.02, cost: 1200, desc: '+25% damage, burns bright' },
   { name: 'Cryo',        col: '#a5f3fc', hp: 110, spd: 1.02, cost: 1200, desc: 'Chill aura slows nearby foes' },
-  { name: '💎N🎱 Turtle', col: '#22c55e', hp: 130, spd: 1.05, cost: 0,   desc: 'The legend himself. Free.' },
+  { name: 'Turbo',        col: '#22c55e', hp: 130, spd: 1.05, cost: 0,   desc: 'Jet-powered legend of the Abyss. Free.' },
 ];
 const WEAPONS = [
   { name: 'Gem Blaster', dmg: 12, rate: 5.0, spd: 560, cost: 0,    desc: 'The classic' },
@@ -138,7 +139,7 @@ const sfx = {
   boom() { noiseBurst(0.35, 0.5, 900); tone(120, 0.35, 'sine', 0.5, 34); },
   rocket() { noiseBurst(0.3, 0.25, 2400); tone(220, 0.3, 'sawtooth', 0.12, 660); },
   dash() { noiseBurst(0.14, 0.16, 3000); },
-  gem() { tone(rnd(1180, 1320), 0.09, 'sine', 0.07, 1760); },
+  gem() { const m = 1 + Math.min(gemStreak, 14) * 0.045; tone(rnd(1180, 1320) * m, 0.09, 'sine', 0.07, 1760 * m); },
   levelup() { [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => tone(f, 0.16, 'triangle', 0.16), i * 70)); },
   hurt() { tone(140, 0.15, 'sawtooth', 0.2, 60); },
   heart() { [660, 880].forEach((f, i) => setTimeout(() => tone(f, 0.14, 'sine', 0.15), i * 80)); },
@@ -268,6 +269,9 @@ let P = null, wave = 0, score = 0, kills = 0, gemsRun = 0, runTime = 0;
 let spawnLeft = 0, spawnTimer = 0, waveState = 'intro', waveT = 0, bossRef = null, bossWave = false, bossSpawned = false, gemsBanked = false;
 let endT = -9, pauseT = -9; // click-guard timestamps for end / pause screens
 let shake = 0, hitstop = 0, draftChoices = [], endless = false, victoryBanked = false;
+let telegraphs = [], confetti = [], banner = null, bannerT = 0, scoreShown = 0, killPopT = 0, xpPulseT = 0,
+  draftT = -9, newBest = false, dmgDir = null, gemStreak = 0, gemStreakT = 0, waveTotal = 1, frameN = 0,
+  fxScale = 1, dtEma = 0.016;
 const MAX_WAVE = 20;
 
 function newPlayer() {
@@ -281,29 +285,31 @@ function newPlayer() {
     fireT: 0, wp,
     dashCh: 2, dashMax: 2, dashCd: 0, dashT: 0,
     rocketCh: 3, rocketMax: 3, rocketCd: 0,
-    combo: 0, comboT: 0, comboBest: 0, hurtT: 0,
+    combo: 0, comboT: 0, comboBest: 0, hurtT: 0, protT: 0, hpGhost: hero.hp, ghostT: 0, kx: 0, ky: 0,
     stacks: {},
   };
 }
 function startRun() {
-  P = newPlayer();
-  enemies = []; projs = []; gems = []; parts = []; texts = []; rings = []; pools = []; hearts = [];
+  P = newPlayer(); P.protT = 1.5; // spawn protection (A17)
+  enemies = []; projs = []; gems = []; parts = []; texts = []; rings = []; pools = []; hearts = []; telegraphs = []; confetti = [];
+  scoreShown = 0; newBest = false;
   wave = 0; score = 0; kills = 0; gemsRun = 0; runTime = 0; endless = false; victoryBanked = false; gemsBanked = false;
   state = 'play'; nextWave();
 }
 function nextWave() {
   wave++; waveState = 'intro'; waveT = 2.0; bossRef = null; bossSpawned = false;
   bossWave = wave % 5 === 0;
-  spawnLeft = bossWave ? 9 : Math.min(6 + wave * 2, 46);
+  spawnLeft = bossWave ? 9 : (wave === 1 ? 6 : Math.min(6 + wave * 2, 46)); // wave 1 opens gentle (A18)
+  waveTotal = spawnLeft;
   spawnTimer = 0.5;
-  addText(W / 2, H * 0.3, bossWave ? `⚠ WAVE ${wave} — ABYSS WARDEN ⚠` : `WAVE ${wave}`, bossWave ? '#f472b6' : '#e9d5ff', 30, 1.6);
+  banner = bossWave ? `⚠ WAVE ${wave} — ABYSS WARDEN ⚠` : `WAVE ${wave}`; bannerT = 1.6; // scaling banner (B10)
 }
 function spawnEnemy() {
+  // foes flash in at the arena edge (a telegraph ring) before they can move or hurt you (A19)
   const edge = (Math.random() * 4) | 0;
-  let x, y; const m = 30;
-  if (edge === 0) { x = rnd(0, W); y = -m; } else if (edge === 1) { x = W + m; y = rnd(0, H); }
-  else if (edge === 2) { x = rnd(0, W); y = H + m; } else { x = -m; y = rnd(0, H); }
-  const hpMul = (1 + (wave - 1) * 0.24) * (save.hard ? 1.3 : 1);
+  let x, y; const m = 26;
+  if (edge === 0) { x = rnd(30, W - 30); y = m; } else if (edge === 1) { x = W - m; y = rnd(30, H - 30); }
+  else if (edge === 2) { x = rnd(30, W - 30); y = H - m; } else { x = m; y = rnd(30, H - 30); }
   let type = 'chaser';
   const roll = Math.random();
   if (bossWave && !bossSpawned) { type = 'boss'; bossSpawned = true; }
@@ -317,14 +323,22 @@ function spawnEnemy() {
     mini: { hp: 10, spd: 128, r: 9, dmg: 6, xp: 1, score: 30, col: '#86efac' },
     boss: { hp: 1500, spd: 40, r: 46, dmg: 24, xp: 40, score: 3000, col: '#e879f9' } }[type];
   const elite = type !== 'boss' && wave >= 3 && Math.random() < 0.08;
-  const e = { x, y, type, ...base, hp: base.hp * hpMul * (elite ? 3 : 1), maxHp: base.hp * hpMul * (elite ? 3 : 1),
-    elite, wob: rnd(0, TAU), chill: 0, burst66: false, burst33: false, miniT: 3 };
+  const dur = type === 'boss' ? 0.9 : 0.45;
+  telegraphs.push({ x, y, t: dur, max: dur, boss: type === 'boss', spec: { type, base, elite, col: base.col } });
+}
+function materialize(tg) {
+  const { type, base, elite } = tg.spec;
+  const hpMul = (1 + (wave - 1) * 0.24) * (save.hard ? 1.3 : 1);
+  const e = { x: tg.x, y: tg.y, type, ...base, hp: base.hp * hpMul * (elite ? 3 : 1), maxHp: base.hp * hpMul * (elite ? 3 : 1),
+    elite, wob: rnd(0, TAU), chill: 0, burst66: false, burst33: false, miniT: 3, kx: 0, ky: 0, spawnT: 0.35, ramT: 0, hitCd: 0 };
   if (elite) { e.xp *= 3; e.score *= 3; }
   enemies.push(e);
   if (type === 'boss') { bossRef = e; sfx.boom(); }
 }
+
 function addText(x, y, str, col, size, life) { texts.push({ x, y, str, col, size: size || 14, life: life || 0.9, max: life || 0.9 }); if (texts.length > 40) texts.shift(); }
 function burst(x, y, col, n, spd) {
+  n = Math.max(1, Math.round(n * fxScale * (save.fx ? 1 : 0.35))); // adaptive + Effects toggle
   for (let i = 0; i < n; i++) { const a = rnd(0, TAU), s = rnd(spd * 0.3, spd); parts.push({ x, y, vx: cos(a) * s, vy: sin(a) * s, life: rnd(0.25, 0.6), max: 0.6, col, r: rnd(1.5, 3.2) }); }
   if (parts.length > 420) parts.splice(0, parts.length - 420);
 }
@@ -334,6 +348,7 @@ function gainXp(v) {
   while (P.xp >= P.xpNext) {
     P.xp -= P.xpNext; P.level++;
     P.xpNext = 12 + P.level * 9 + ((P.level * P.level) / 2 | 0); // v2.6.2 curve
+    P.magnetR = 110 + (P.level - 1) * 2; xpPulseT = 0.35; // magnet grows per level (A20)
     openDraft();
   }
 }
@@ -345,12 +360,13 @@ function openDraft() {
     draftChoices.push(pool.splice(i, 1)[0]);
   }
   if (!draftChoices.length) { heal(30); return; }
-  state = 'draft'; sfx.draft();
+  draftT = time; state = 'draft'; sfx.draft();
 }
 function applyUpgrade(u) {
   P.stacks[u.id] = (P.stacks[u.id] || 0) + 1;
   u.f(); sfx.levelup();
   rings.push({ x: P.x, y: P.y, r: 10, life: 0.45, max: 0.45, col: '#4ade80' });
+  for (const e of enemies) { const d = hyp(e.x - P.x, e.y - P.y); if (d > 0 && d < 140) { const a = atan2(e.y - P.y, e.x - P.x); e.kx = (e.kx || 0) + cos(a) * 340; e.ky = (e.ky || 0) + sin(a) * 340; } } // level-up shockwave
   for (const g of gems) g.mag = true; // level-up vacuum, like the Android game
   state = 'play';
 }
@@ -359,33 +375,42 @@ function damageEnemy(e, dmg, kx, ky) {
   const crit = Math.random() < P.critCh;
   const d = dmg * (crit ? P.critMul : 1);
   e.hp -= d;
+  if (kx || ky) { const mass = e.type === 'boss' ? 0.12 : (e.type === 'brute' ? 0.45 : 1); e.kx = (e.kx || 0) + kx * mass; e.ky = (e.ky || 0) + ky * mass; }
   if (crit) addText(e.x, e.y - e.r - 8, 'CRIT ' + Math.round(d), '#facc15', 15, 0.7);
   else if (Math.random() < 0.4) addText(e.x + rnd(-6, 6), e.y - e.r - 6, '' + Math.round(d), '#e2e8f0', 12, 0.55);
   if (P.lifesteal > 0) heal(d * P.lifesteal * 0.1);
   if (e.hp <= 0) killEnemy(e);
 }
 function killEnemy(e) {
-  kills++; P.combo++; P.comboT = 2.5; P.comboBest = Math.max(P.comboBest, P.combo);
+  kills++; P.combo++; P.comboT = P.combo >= 20 ? 3.4 : 2.5; P.comboBest = Math.max(P.comboBest, P.combo); killPopT = 0.18;
+  if (P.combo % 25 === 0) addText(W / 2, H * 0.22, '🔥 COMBO ' + P.combo + '!', '#fb923c', 26, 1.3); // streak banner (A9)
   const mult = 1 + Math.min(4, (P.combo / 10) | 0);
   score += e.score * mult;
   burst(e.x, e.y, e.col, e.type === 'boss' ? 60 : 12, 300);
   sfx.hit();
+  if (e.elite) { hitstop = Math.max(hitstop, 0.03); explodeFx(e.x, e.y, 58, 18, e); } // elite chain explosion (A7)
+  if (e.type === 'boss') hitstop = Math.max(hitstop, 0.07);
   const dropHeart = e.type === 'boss' ? true : (e.elite ? Math.random() < 0.18 : (e.type === 'brute' ? Math.random() < 0.10 : Math.random() < 0.012));
   if (dropHeart && hearts.length < 2) hearts.push({ x: e.x, y: e.y, t: 0 });
   let xpLeft = e.xp;
-  while (xpLeft > 0) { const v = Math.min(xpLeft, 5); gems.push({ x: e.x + rnd(-14, 14), y: e.y + rnd(-14, 14), v, mag: false, t: rnd(0, TAU) }); xpLeft -= v; }
+  while (xpLeft > 0) { const v = Math.min(xpLeft, 5); gems.push({ x: e.x + rnd(-14, 14), y: e.y + rnd(-14, 14), v, mag: false, t: rnd(0, TAU), age: 0 }); xpLeft -= v; }
+  if (gems.length > 140) gems.splice(0, gems.length - 140); // entity budget (C19)
   if (e.type === 'splitter') for (let i = 0; i < 2; i++) {
     enemies.push({ x: e.x + rnd(-16, 16), y: e.y + rnd(-16, 16), type: 'mini', hp: 10 * (1 + (wave - 1) * 0.24), maxHp: 10, spd: 128, r: 9, dmg: 6, xp: 1, score: 30, col: '#86efac', elite: false, wob: rnd(0, TAU), chill: 0 });
   }
   if (e.type === 'boss') { bossRef = null; shake = Math.max(shake, 10); sfx.boom(); addText(e.x, e.y, 'WARDEN DOWN!', '#facc15', 26, 1.6); }
 }
-function explode(x, y, aoe, dmg) {
+function explode(x, y, aoe, dmg, noPool) {
   rings.push({ x, y, r: 8, life: 0.35, max: 0.35, col: '#fb923c' });
   burst(x, y, '#fb923c', 16, 360); burst(x, y, '#fef08a', 8, 220);
-  pools.push({ x, y, r: 44, life: 2.2, max: 2.2 });
-  if (pools.length > 42) pools.shift();
+  if (!noPool) { pools.push({ x, y, r: 44, life: 2.2, max: 2.2 }); if (pools.length > 42) pools.shift(); }
   sfx.boom(); shake = Math.max(shake, 5);
-  for (const e of [...enemies]) if (e.hp > 0 && hyp(e.x - x, e.y - y) < aoe + e.r * 0.5) damageEnemy(e, dmg, x, y);
+  for (const e of [...enemies]) if (e.hp > 0 && hyp(e.x - x, e.y - y) < aoe + e.r * 0.5) { const a = atan2(e.y - y, e.x - x); damageEnemy(e, dmg, cos(a) * 300, sin(a) * 300); }
+}
+function explodeFx(x, y, aoe, dmg, src) { // light explosion: no pool, no shake (elite chain reactions)
+  rings.push({ x, y, r: 8, life: 0.3, max: 0.3, col: '#facc15' });
+  burst(x, y, '#facc15', 10, 300);
+  for (const o of [...enemies]) if (o !== src && o.hp > 0 && hyp(o.x - x, o.y - y) < aoe + o.r * 0.5) { const a = atan2(o.y - y, o.x - x); damageEnemy(o, dmg, cos(a) * 240, sin(a) * 240); }
 }
 function doDash() {
   if (!P || state !== 'play' || P.dashCh <= 0 || P.dashT > 0) return;
@@ -409,6 +434,7 @@ function doRocket() {
 function bankRun() {
   if (!gemsBanked) { gemsBanked = true; save.bank += gemsRun; save.kills += kills; }
   if (score > save.best) save.best = score;
+  if (P && P.comboBest > save.bestCombo) save.bestCombo = P.comboBest;
   if (wave > save.bestWave) save.bestWave = wave;
   persist();
 }
@@ -416,6 +442,8 @@ function endRun(won) {
   state = won ? 'win' : 'over';
   shake = 0; endT = time;
   if (won && !victoryBanked) { victoryBanked = true; save.victories++; }
+  newBest = score > save.best && score > 0;
+  if (won) for (let i = 0; i < 90; i++) confetti.push({ x: rnd(0, W), y: rnd(-H * 0.4, -10), vx: rnd(-24, 24), vy: rnd(36, 110), rot: rnd(0, TAU), rs: rnd(-4, 4), ph: rnd(0, TAU), life: rnd(2.4, 4), col: ['#facc15', '#4ade80', '#22d3ee', '#e879f9', '#f472b6'][(Math.random() * 5) | 0] }); // victory confetti (A21)
   bankRun();
 }
 function pauseGame() { if (state === 'play') { state = 'pause'; pauseT = time; } }
@@ -427,15 +455,19 @@ function update(dt) {
   // shake decays on EVERY screen (v1.1 fix: it used to freeze mid-shake on the death screen)
   if (shake > 0) shake = Math.max(0, shake - 30 * dt);
   musicTick(dt, !!bossRef);
-  // particles / texts / rings always drift
-  for (const p of parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
-  parts = parts.filter(p => p.life > 0);
-  for (const t of texts) { t.y -= 34 * dt; t.life -= dt; }
-  texts = texts.filter(t => t.life > 0);
-  for (const r of rings) { r.r += 190 * dt; r.life -= dt; }
-  rings = rings.filter(r => r.life > 0);
-  for (const g of ghosts) g.life -= dt;
-  ghosts = ghosts.filter(g => g.life > 0);
+  // particles / texts / rings always drift — in-place compaction, no per-frame array garbage (C7)
+  for (let i = parts.length - 1; i >= 0; i--) { const p = parts[i]; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; if (p.life <= 0) { parts[i] = parts[parts.length - 1]; parts.pop(); } }
+  for (let i = texts.length - 1; i >= 0; i--) { const t = texts[i]; t.y -= 34 * dt; t.life -= dt; if (t.life <= 0) { texts[i] = texts[texts.length - 1]; texts.pop(); } }
+  if (rings.length > 24) rings.splice(0, rings.length - 24); // rings budget (C15)
+  for (let i = rings.length - 1; i >= 0; i--) { const r = rings[i]; r.r += 190 * dt; r.life -= dt; if (r.life <= 0) { rings[i] = rings[rings.length - 1]; rings.pop(); } }
+  for (let i = ghosts.length - 1; i >= 0; i--) { ghosts[i].life -= dt; if (ghosts[i].life <= 0) { ghosts[i] = ghosts[ghosts.length - 1]; ghosts.pop(); } }
+  for (let i = confetti.length - 1; i >= 0; i--) { const c = confetti[i]; c.vy += 300 * dt; c.x += c.vx * dt + sin(time * 6 + c.ph) * 30 * dt; c.y += c.vy * dt; c.rot += c.rs * dt; c.life -= dt; if (c.life <= 0 || c.y > H + 12) { confetti[i] = confetti[confetti.length - 1]; confetti.pop(); } }
+  if (killPopT > 0) killPopT -= dt;
+  if (xpPulseT > 0) xpPulseT -= dt;
+  if (bannerT > 0) bannerT -= dt;
+  if (scoreShown < score) scoreShown = Math.min(score, scoreShown + Math.ceil((score - scoreShown) * 10 * dt) + 1); else if (scoreShown !== score) scoreShown = score; // score ticker (B1)
+  frameN++;
+  dtEma = dtEma * 0.95 + dt * 0.05; fxScale = dtEma > 0.021 ? 0.5 : 1; // adaptive quality (C13)
   if (state !== 'play') return;
   if (hitstop > 0) { hitstop -= dt; return; }
   runTime += dt;
@@ -449,8 +481,9 @@ function update(dt) {
   if (joy.on && hyp(joy.dx, joy.dy) > 0.12) { mx = joy.dx; my = joy.dy; }
   const mm = hyp(mx, my); if (mm > 1) { mx /= mm; my /= mm; }
   const spd = 265 * P.speedMul * (P.dashT > 0 ? 2.6 : 1);
-  P.x = clamp(P.x + mx * spd * dt, P.r, W - P.r);
-  P.y = clamp(P.y + my * spd * dt, P.r, H - P.r);
+  P.x = clamp(P.x + (mx * spd + P.kx) * dt, P.r, W - P.r);
+  P.y = clamp(P.y + (my * spd + P.ky) * dt, P.r, H - P.r);
+  const kdec = Math.max(0, 1 - 6 * dt); P.kx *= kdec; P.ky *= kdec;
   if (mm > 0.12) P.face = atan2(my, mx);
   // aim: mouse (PC) or aim stick (touch) — manual aim, always
   if (touchMode && aim.on && hyp(aim.dx, aim.dy) > 0.12) P.aim = atan2(aim.dy, aim.dx);
@@ -462,8 +495,10 @@ function update(dt) {
     if (ghosts.length > 16) ghosts.shift();
   }
   if (P.hurtT > 0) P.hurtT -= dt;
+  if (P.protT > 0) P.protT -= dt;
+  if (P.hpGhost > P.hp) { if (P.ghostT > 0) P.ghostT -= dt; else P.hpGhost = Math.max(P.hp, P.hpGhost - 46 * dt); } else P.hpGhost = P.hp; // damage ghost bar (B2)
   P.dashCd += dt; if (P.dashCd >= 2.2 && P.dashCh < P.dashMax) { P.dashCh++; P.dashCd = 0; }
-  P.rocketCd += dt; if (P.rocketCd >= 2.2 && P.rocketCh < P.rocketMax) { P.rocketCh++; P.rocketCd = 0; }
+  P.rocketCd += dt; if (P.rocketCd >= 2.2 && P.rocketCh < P.rocketMax) { P.rocketCh++; P.rocketCd = 0; rings.push({ x: P.x, y: P.y, r: 6, life: 0.25, max: 0.25, col: '#fb923c' }); } // refill pop (A22)
   if (P.regen > 0) heal(P.regen * dt);
   if (P.comboT > 0) { P.comboT -= dt; if (P.comboT <= 0) P.combo = 0; }
   // Cryo aura
@@ -489,18 +524,33 @@ function update(dt) {
   else if (spawnLeft > 0) {
     spawnTimer -= dt;
     if (spawnTimer <= 0) { spawnTimer = Math.max(0.25, 0.9 - wave * 0.03); spawnEnemy(); spawnLeft--; }
-  } else if (!enemies.length) {
+  } else if (!enemies.length && !telegraphs.length) {
     if (wave >= MAX_WAVE && !endless) { endRun(true); return; }
+    const bonus = 25 * wave; score += bonus; gemsRun += 2; // wave-clear bonus (A8)
+    addText(W / 2, H * 0.4, `WAVE CLEAR +${bonus}`, '#4ade80', 19, 1.2);
     nextWave();
   }
+  /* --- spawn telegraphs --- */
+  for (let i = telegraphs.length - 1; i >= 0; i--) { const tg = telegraphs[i]; tg.t -= dt; if (tg.t <= 0) { telegraphs.splice(i, 1); materialize(tg); } }
 
   /* --- enemies --- */
   for (const e of enemies) {
+    if (e.spawnT > 0) { e.spawnT -= dt; continue; }
     const slow = e.chill > 0 ? 0.55 : 1;
     if (e.chill > 0) e.chill -= dt;
+    if (e.kx || e.ky) { e.x += (e.kx || 0) * dt; e.y += (e.ky || 0) * dt; const dec = Math.max(0, 1 - 7 * dt); e.kx *= dec; e.ky *= dec; }
     let a = atan2(P.y - e.y, P.x - e.x);
     if (e.type === 'dart') a += sin(time * 5 + e.wob) * 0.7;
-    e.x += cos(a) * e.spd * slow * dt; e.y += sin(a) * e.spd * slow * dt;
+    let spdMul = 1;
+    if (e.type === 'brute') { // telegraphed lunge (A12): wind-up flash, then a burst at you
+      if (e.lungeT === undefined) { e.lungeT = rnd(1.4, 2.4); e.lungePh = 0; }
+      e.lungeT -= dt;
+      if (e.lungePh === 0 && e.lungeT <= 0.45) e.lungePh = 1;
+      if (e.lungePh === 1) { spdMul = 0.25; if (e.lungeT <= 0) { e.lungePh = 2; e.lungeT = 0.38; e.lungeA = a; } }
+      else if (e.lungePh === 2) { spdMul = 3.1; a = e.lungeA; if (e.lungeT <= 0) { e.lungePh = 0; e.lungeT = rnd(1.6, 2.6); } }
+    }
+    if (e.type === 'boss' && e.hp < e.maxHp * 0.25) spdMul = 1.45; // enrage (A13)
+    e.x += cos(a) * e.spd * slow * spdMul * dt; e.y += sin(a) * e.spd * slow * spdMul * dt;
     if (e.type === 'boss') {
       const frac = e.hp / e.maxHp;
       if (!e.burst66 && frac <= 0.66) { e.burst66 = true; bossBurst(e, 16); }
@@ -509,59 +559,81 @@ function update(dt) {
       if (e.miniT <= 0 && enemies.length < 40) { e.miniT = 3.5; const m = { x: e.x + rnd(-40, 40), y: e.y + rnd(-40, 40), type: 'mini', hp: 10, maxHp: 10, spd: 128, r: 9, dmg: 6, xp: 1, score: 30, col: '#86efac', elite: false, wob: rnd(0, TAU), chill: 0 }; enemies.push(m); }
     }
     if (e.hitCd > 0) e.hitCd -= dt;
-    if (hyp(e.x - P.x, e.y - P.y) < e.r + P.r && P.dashT <= 0 && !(e.hitCd > 0)) {
-      e.hitCd = 0.7;
-      const d = Math.max(1, e.dmg - P.armor);
-      P.hp -= d; P.hurtT = 0.35; shake = Math.max(shake, 4); sfx.hurt();
-      addText(P.x, P.y - 30, '-' + Math.round(d), '#f87171', 15, 0.7);
-      if (P.hp <= 0) { P.hp = 0; endRun(false); return; }
+    if (e.ramT > 0) e.ramT -= dt;
+    const dxp = e.x - P.x, dyp = e.y - P.y, rrSum = e.r + P.r;
+    if (dxp * dxp + dyp * dyp < rrSum * rrSum) { // squared distance (C10)
+      if (P.dashT > 0) { // dash ram (A3): plow through, take nothing
+        if (!(e.ramT > 0)) { e.ramT = 0.35; const ra = atan2(dyp, dxp); damageEnemy(e, 10, cos(ra) * 420, sin(ra) * 420); }
+      } else if (!(e.hitCd > 0) && P.protT <= 0) { // spawn protection skips the hit entirely (A17)
+        e.hitCd = 0.7;
+        const d = Math.max(1, e.dmg - P.armor);
+        P.hp -= d; P.hurtT = 0.35; P.ghostT = 0.55; shake = Math.max(shake, 4); sfx.hurt();
+        dmgDir = { a: atan2(dyp, dxp), t: 0.55 }; // damage direction arc (A14)
+        const pa = atan2(P.y - e.y, P.x - e.x); P.kx += cos(pa) * 150; P.ky += sin(pa) * 150; // player knockback (A2)
+        addText(P.x, P.y - 30, '-' + Math.round(d), '#f87171', 15, 0.7);
+        if (P.hp <= 0) { P.hp = 0; endRun(false); return; }
+      }
     }
   }
-  // gentle separation
-  for (let i = 0; i < enemies.length; i++) for (let j = i + 1; j < enemies.length; j++) {
-    const a = enemies[i], b = enemies[j], d = hyp(a.x - b.x, a.y - b.y), min = a.r + b.r;
-    if (d > 0 && d < min) { const push = (min - d) / 2, ux = (a.x - b.x) / d, uy = (a.y - b.y) / d; a.x += ux * push; a.y += uy * push; b.x -= ux * push; b.y -= uy * push; }
+  // gentle separation — every other frame, squared distances, bosses don't get pushed (C11)
+  if (frameN % 2 === 0) for (let i = 0; i < enemies.length; i++) for (let j = i + 1; j < enemies.length; j++) {
+    const a = enemies[i], b = enemies[j];
+    if (a.spawnT > 0 || b.spawnT > 0) continue;
+    const dx = a.x - b.x, dy = a.y - b.y, min = a.r + b.r;
+    if (dx > min || dx < -min || dy > min || dy < -min) continue;
+    const d2 = dx * dx + dy * dy;
+    if (d2 > 0.01 && d2 < min * min) { const d = Math.sqrt(d2), push = (min - d) / 2, ux = dx / d, uy = dy / d; if (a.type !== 'boss') { a.x += ux * push; a.y += uy * push; } if (b.type !== 'boss') { b.x -= ux * push; b.y -= uy * push; } }
   }
 
-  /* --- projectiles --- */
-  const deadP = [];
-  for (const pr of projs) {
+  /* --- projectiles: in-place sweep, squared distances (C8/C9) --- */
+  for (let i = projs.length - 1; i >= 0; i--) {
+    const pr = projs[i];
     pr.x += pr.vx * dt; pr.y += pr.vy * dt; pr.life -= dt;
+    let dead = false;
     if (pr.rocket) {
-      if (Math.random() < 0.9) parts.push({ x: pr.x, y: pr.y, vx: rnd(-16, 16), vy: rnd(-16, 16), life: 0.4, max: 0.4, col: '#a8a29e', r: 2.6 });
+      if (Math.random() < 0.1 + 0.8 * fxScale) parts.push({ x: pr.x, y: pr.y, vx: rnd(-16, 16), vy: rnd(-16, 16), life: 0.4, max: 0.4, col: '#a8a29e', r: 2.6 });
       // v2.6.2: end of the board — blow up ON the edge
       if (pr.x < pr.r || pr.x > W - pr.r || pr.y < pr.r || pr.y > H - pr.r) {
         pr.x = clamp(pr.x, pr.r, W - pr.r); pr.y = clamp(pr.y, pr.r, H - pr.r);
-        explode(pr.x, pr.y, pr.aoe, pr.dmg); deadP.push(pr); continue;
+        explode(pr.x, pr.y, pr.aoe, pr.dmg); dead = true;
       }
     }
-    if (pr.life <= 0 || pr.x < -60 || pr.x > W + 60 || pr.y < -60 || pr.y > H + 60) { deadP.push(pr); continue; }
-    if (pr.friendly) {
+    if (!dead && (pr.life <= 0 || pr.x < -60 || pr.x > W + 60 || pr.y < -60 || pr.y > H + 60)) dead = true;
+    if (!dead && pr.friendly) {
       for (const e of enemies) {
-        if (e.hp > 0 && hyp(e.x - pr.x, e.y - pr.y) < e.r + pr.r) {
-          if (pr.rocket) { explode(pr.x, pr.y, pr.aoe, pr.dmg); }
+        if (e.hp <= 0 || e.spawnT > 0) continue;
+        const dx = e.x - pr.x, dy = e.y - pr.y, rr2 = e.r + pr.r;
+        if (dx * dx + dy * dy < rr2 * rr2) {
+          if (pr.rocket) explode(pr.x, pr.y, pr.aoe, pr.dmg * 1.4); // direct-hit bonus (A4)
           else {
-            damageEnemy(e, pr.dmg, pr.x, pr.y);
+            damageEnemy(e, pr.dmg, pr.vx * 0.32, pr.vy * 0.32); // bullet knockback (A1)
             if (pr.chill) e.chill = Math.max(e.chill, pr.chill);
-            if (pr.aoe) explode(pr.x, pr.y, pr.aoe, pr.dmg * 0.6);
+            if (pr.aoe) explode(pr.x, pr.y, pr.aoe, pr.dmg * 0.6, true);
           }
-          deadP.push(pr); break;
+          dead = true; break;
         }
       }
-    } else if (hyp(pr.x - P.x, pr.y - P.y) < P.r + pr.r && P.dashT <= 0) {
-      const d = Math.max(1, pr.dmg - P.armor);
-      P.hp -= d; P.hurtT = 0.35; sfx.hurt(); deadP.push(pr);
-      if (P.hp <= 0) { P.hp = 0; endRun(false); return; }
+    } else if (!dead && !pr.friendly) {
+      const dx = pr.x - P.x, dy = pr.y - P.y, rr2 = P.r + pr.r;
+      if (dx * dx + dy * dy < rr2 * rr2 && P.dashT <= 0) {
+        if (P.protT <= 0) {
+          const d = Math.max(1, pr.dmg - P.armor);
+          P.hp -= d; P.hurtT = 0.35; P.ghostT = 0.55; sfx.hurt();
+          dmgDir = { a: atan2(dy, dx), t: 0.55 };
+          if (P.hp <= 0) { P.hp = 0; endRun(false); return; }
+        }
+        dead = true;
+      }
     }
+    if (dead) { projs[i] = projs[projs.length - 1]; projs.pop(); }
   }
-  projs = projs.filter(p => !deadP.includes(p));
   enemies = enemies.filter(e => e.hp > 0);
 
   /* --- pools (rocket fire) --- */
   for (const pl of pools) {
     pl.life -= dt;
-    if (Math.random() < 0.3) parts.push({ x: pl.x + rnd(-pl.r, pl.r) * 0.6, y: pl.y, vx: 0, vy: -36, life: 0.5, max: 0.5, col: '#fb923c', r: 2.2 });
-    for (const e of enemies) if (hyp(e.x - pl.x, e.y - pl.y) < pl.r + e.r * 0.5) e.hp -= 30 * dt;
+    if (Math.random() < 0.05 + 0.25 * fxScale) parts.push({ x: pl.x + rnd(-pl.r, pl.r) * 0.6, y: pl.y, vx: 0, vy: -36, life: 0.5, max: 0.5, col: '#fb923c', r: 2.2 });
+    for (const e of enemies) { const dx = e.x - pl.x, dy = e.y - pl.y, rr2 = pl.r + e.r * 0.5; if (dx * dx + dy * dy < rr2 * rr2) { e.hp -= 30 * dt; e.chill = Math.max(e.chill, 0.12); } } // pools burn AND slow (A5)
   }
   pools = pools.filter(p => p.life > 0);
   const poolDead = enemies.filter(e => e.hp <= 0);
@@ -570,15 +642,19 @@ function update(dt) {
 
   /* --- gems & hearts --- */
   for (const g of gems) {
-    g.t += dt * 3;
-    const d = hyp(g.x - P.x, g.y - P.y);
-    if (g.mag || d < P.magnetR) { const a = atan2(P.y - g.y, P.x - g.x), s = g.mag ? 520 : 300; g.x += cos(a) * s * dt; g.y += sin(a) * s * dt; }
-    if (d < 26) { g.got = true; gemsRun += g.v; gainXp(g.v); sfx.gem(); if (state !== 'play') return; }
+    g.t += dt * 3; g.age = (g.age || 0) + dt;
+    const dx = g.x - P.x, dy = g.y - P.y, d2 = dx * dx + dy * dy;
+    if (g.mag || d2 < P.magnetR * P.magnetR) { const a = atan2(-dy, -dx), spd2 = g.mag ? 520 : 300; g.x += cos(a) * spd2 * dt; g.y += sin(a) * spd2 * dt; }
+    if (d2 < 676) { g.got = true; gemsRun += g.v; gemStreak = time - gemStreakT < 0.55 ? gemStreak + 1 : 0; gemStreakT = time; gainXp(g.v); sfx.gem(); if (state !== 'play') return; }
   }
+  // old gems merge into fewer, bigger ones (A24)
+  for (let i = gems.length - 1; i >= 0; i--) { const g = gems[i]; if (g.got || (g.age || 0) < 6) continue; for (let j = 0; j < gems.length; j++) { const o = gems[j]; if (o !== g && !o.got && Math.abs(o.x - g.x) < 30 && Math.abs(o.y - g.y) < 30) { o.v = Math.min(25, o.v + g.v); o.age = 0; g.got = true; break; } } }
   gems = gems.filter(g => !g.got);
   for (const h of hearts) {
     h.t += dt * 2;
-    if (hyp(h.x - P.x, h.y - P.y) < 28) { h.got = true; heal(15); sfx.heart(); addText(P.x, P.y - 30, '+15 HP', '#f87171', 15, 0.9); }
+    const dx = h.x - P.x, dy = h.y - P.y, d2 = dx * dx + dy * dy;
+    if (d2 < 4900 && d2 > 1) { const a = atan2(-dy, -dx); h.x += cos(a) * 130 * dt; h.y += sin(a) * 130 * dt; } // hearts drift in (A10)
+    if (d2 < 784) { h.got = true; heal(15); sfx.heart(); addText(P.x, P.y - 30, '+15 HP', '#f87171', 15, 0.9); }
   }
   hearts = hearts.filter(h => !h.got);
 }
@@ -608,8 +684,10 @@ function rr(x, y, w, h, r, fill, alpha) {
   ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
   ctx.fillStyle = fill; ctx.globalAlpha = alpha == null ? 1 : alpha; ctx.fill(); ctx.globalAlpha = 1;
 }
+let lastFont = '';
 function txt(str, x, y, size, col, align, bold) {
-  ctx.font = (bold ? '700 ' : '') + size + 'px "Segoe UI", system-ui, sans-serif';
+  const f = (bold ? '700 ' : '') + size + 'px "Segoe UI", system-ui, sans-serif';
+  if (f !== lastFont) { ctx.font = f; lastFont = f; }
   ctx.textAlign = align || 'center'; ctx.fillStyle = col; ctx.fillText(str, x, y);
 }
 function heartPath(x, y, r) {
@@ -626,6 +704,51 @@ function polyPath(x, y, r, n, rot) {
   ctx.closePath();
 }
 function poly(x, y, r, n, rot, col) { polyPath(x, y, r, n, rot); ctx.fillStyle = col; ctx.fill(); }
+/* ---- pre-rendered sprites (C4/C5): gradient shells and foe bodies are drawn ONCE
+   into offscreen canvases, then blitted per frame — the single biggest mobile win ---- */
+function polyOn(b, x, y, r, n, rot, col) { b.beginPath(); for (let i = 0; i < n; i++) { const a = rot + TAU * i / n; const px = x + cos(a) * r, py = y + sin(a) * r; i ? b.lineTo(px, py) : b.moveTo(px, py); } b.closePath(); b.fillStyle = col; b.fill(); }
+const shellCache = new Map();
+function shellSprite(col, r) {
+  const key = col + '_' + r + '_' + DPR;
+  let c = shellCache.get(key);
+  if (c) return c;
+  const pad = Math.ceil(r * 0.25) + 2, css = (r + pad) * 2;
+  c = document.createElement('canvas'); c.width = Math.ceil(css * DPR); c.height = Math.ceil(css * DPR);
+  const b = c.getContext('2d'); b.scale(DPR, DPR);
+  const x = css / 2, y = css / 2;
+  const g = b.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.15, x, y, r);
+  g.addColorStop(0, shade(col, 1.3)); g.addColorStop(0.55, col); g.addColorStop(1, shade(col, 0.45));
+  b.beginPath(); b.arc(x, y, r, 0, TAU); b.fillStyle = g; b.fill();
+  b.beginPath(); b.arc(x, y, r * 0.96, 0, TAU); b.strokeStyle = shade(col, 0.5); b.lineWidth = r * 0.09; b.stroke();
+  b.strokeStyle = 'rgba(0,0,0,0.28)'; b.lineWidth = 1.4; b.beginPath();
+  for (let i = 0; i < 12; i++) { const a = TAU * i / 12 + 0.13; b.moveTo(x + cos(a) * r * 0.88, y + sin(a) * r * 0.88); b.lineTo(x + cos(a) * r * 1.0, y + sin(a) * r * 1.0); }
+  b.stroke();
+  for (let i = 0; i < 6; i++) { const a = TAU * i / 6; const px = x + cos(a) * r * 0.52, py = y + sin(a) * r * 0.52; b.beginPath(); b.arc(px, py, r * 0.29, 0, TAU); b.fillStyle = shade(col, 0.88); b.fill(); b.strokeStyle = 'rgba(0,0,0,0.3)'; b.lineWidth = 1.4; b.stroke(); }
+  polyOn(b, x, y, r * 0.33, 6, 0, shade(col, 1.12));
+  polyOn(b, x, y, r * 0.11, 4, 0.8, shade(col, 1.3)); // matte center gem (v1.5)
+  c._css = css;
+  shellCache.set(key, c);
+  return c;
+}
+const foeCache = new Map();
+function foeSprite(e) {
+  const key = e.type + '_' + e.col + '_' + e.r + '_' + DPR;
+  let c = foeCache.get(key);
+  if (c) return c;
+  const n = { chaser: 3, dart: 4, brute: 6, splitter: 4, mini: 3, boss: 5 }[e.type];
+  const css = e.r * 1.3 * 2;
+  c = document.createElement('canvas'); c.width = Math.ceil(css * DPR); c.height = Math.ceil(css * DPR);
+  const b = c.getContext('2d'); b.scale(DPR, DPR);
+  const x = css / 2, y = css / 2;
+  if (e.type === 'brute' || e.type === 'boss') { const spikes = e.type === 'boss' ? 10 : 8; for (let i = 0; i < spikes; i++) { const a = TAU * i / spikes; polyOn(b, x + cos(a) * e.r * 1.04, y + sin(a) * e.r * 1.04, e.r * 0.22, 3, a, shade(e.col, 0.55)); } }
+  const g = b.createRadialGradient(x - e.r * 0.3, y - e.r * 0.32, e.r * 0.1, x, y, e.r);
+  g.addColorStop(0, shade(e.col, 1.3)); g.addColorStop(1, shade(e.col, 0.55));
+  b.beginPath(); for (let i = 0; i < n; i++) { const a = TAU * i / n; const px = x + cos(a) * e.r, py = y + sin(a) * e.r; i ? b.lineTo(px, py) : b.moveTo(px, py); } b.closePath(); b.fillStyle = g; b.fill();
+  polyOn(b, x, y, e.r * 0.62, n, 0.5, shade(e.col, 0.85));
+  c._css = css;
+  foeCache.set(key, c);
+  return c;
+}
 /* v1.2 detail pass: gradient shell with plates + rim scutes, paddling flippers,
    metal jet nozzles with 3-layer flames, blaster nub, glossy head with glint eye. */
 function drawTurtle(x, y, r, col, aimA, t, dashing, detail) {
@@ -651,25 +774,9 @@ function drawTurtle(x, y, r, col, aimA, t, dashing, detail) {
     ctx.beginPath(); ctx.arc(jx, jy, r * 0.17, 0, TAU); ctx.fillStyle = '#475569'; ctx.fill();
     ctx.beginPath(); ctx.arc(jx, jy, r * 0.1, 0, TAU); ctx.fillStyle = '#1e293b'; ctx.fill();
   }
-  // shell: radial gradient (v1.5: shadow-blur rim glow REMOVED — sparkles off the main units, and shadowBlur is what chokes mobile GPUs)
-  const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.15, x, y, r);
-  g.addColorStop(0, shade(col, 1.3)); g.addColorStop(0.55, col); g.addColorStop(1, shade(col, 0.45));
-  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fillStyle = g; ctx.fill();
-  // rim ring + scute ticks
-  ctx.beginPath(); ctx.arc(x, y, r * 0.96, 0, TAU); ctx.strokeStyle = shade(col, 0.5); ctx.lineWidth = r * 0.09; ctx.stroke();
-  ctx.strokeStyle = 'rgba(0,0,0,0.28)'; ctx.lineWidth = 1.4; ctx.beginPath();
-  for (let i = 0; i < 12; i++) { const a = TAU * i / 12 + 0.13; ctx.moveTo(x + cos(a) * r * 0.88, y + sin(a) * r * 0.88); ctx.lineTo(x + cos(a) * r * 1.0, y + sin(a) * r * 1.0); }
-  ctx.stroke();
-  // shell plates: six around a center plate, turning slowly together
-  for (let i = 0; i < 6; i++) {
-    const a = TAU * i / 6 + t * 0.05;
-    const px = x + cos(a) * r * 0.52, py = y + sin(a) * r * 0.52;
-    ctx.beginPath(); ctx.arc(px, py, r * 0.29, 0, TAU); ctx.fillStyle = shade(col, 0.88); ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1.4; ctx.stroke();
-  }
-  poly(x, y, r * 0.33, 6, t * 0.05, shade(col, 1.12));
-  // center gem — small and matte (v1.5: the white sparkle diamond is gone)
-  poly(x, y, r * 0.11, 4, t * 1.5, shade(col, 1.3));
+  // shell: pre-rendered sprite (gradient + rim + plates + matte gem baked in)
+  const spr = shellSprite(col, r);
+  ctx.drawImage(spr, x - spr._css / 2, y - spr._css / 2, spr._css, spr._css);
   // blaster nub on the aim side
   const bx = x + cos(aimA) * r, by = y + sin(aimA) * r;
   ctx.beginPath(); ctx.arc(bx, by, r * 0.16, 0, TAU); ctx.fillStyle = '#334155'; ctx.fill();
@@ -683,27 +790,39 @@ function drawTurtle(x, y, r, col, aimA, t, dashing, detail) {
   ctx.beginPath(); ctx.arc(ex, ey, r * 0.1, 0, TAU); ctx.fillStyle = '#0f172a'; ctx.fill();
   ctx.beginPath(); ctx.arc(ex - r * 0.03, ey - r * 0.03, r * 0.035, 0, TAU); ctx.fillStyle = '#ffffff'; ctx.fill();
 }
-function drawBackground() {
-  ctx.fillStyle = '#0a0618'; ctx.fillRect(0, 0, W, H);
-  // nebula blobs
+let bgCv = null;
+function buildBg() { // nebula + grid + static stars are baked ONCE per resize (C1/C2/C3)
+  bgCv = document.createElement('canvas');
+  bgCv.width = cv.width; bgCv.height = cv.height;
+  const b = bgCv.getContext('2d'); b.setTransform(DPR, 0, 0, DPR, 0, 0);
+  b.fillStyle = '#0a0618'; b.fillRect(0, 0, W, H);
   const blobs = [[0.22, 0.3, '#3b0764'], [0.78, 0.62, '#1e1b4b'], [0.55, 0.12, '#082f49']];
   for (const [fx, fy, c] of blobs) {
-    const g = ctx.createRadialGradient(W * fx, H * fy, 10, W * fx, H * fy, 260);
+    const g = b.createRadialGradient(W * fx, H * fy, 10, W * fx, H * fy, 260);
     g.addColorStop(0, c); g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.globalAlpha = 0.5; ctx.fillStyle = g; ctx.fillRect(W * fx - 260, H * fy - 260, 520, 520); ctx.globalAlpha = 1;
+    b.globalAlpha = 0.5; b.fillStyle = g; b.fillRect(W * fx - 260, H * fy - 260, 520, 520); b.globalAlpha = 1;
   }
-  ctx.strokeStyle = 'rgba(139,92,246,0.10)'; ctx.lineWidth = 1; ctx.beginPath();
-  for (let x = 0; x <= W; x += 46) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
-  for (let y = 0; y <= H; y += 46) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
-  ctx.stroke();
-  for (const s of stars) {
-    ctx.globalAlpha = 0.35 + 0.3 * sin(time * 2 + s.p);
+  b.strokeStyle = 'rgba(139,92,246,0.10)'; b.lineWidth = 1; b.beginPath();
+  for (let x = 0; x <= W; x += 46) { b.moveTo(x, 0); b.lineTo(x, H); }
+  for (let y = 0; y <= H; y += 46) { b.moveTo(0, y); b.lineTo(W, y); }
+  b.stroke();
+  b.fillStyle = '#e2e8f0'; b.globalAlpha = 0.55;
+  for (let i = 14; i < stars.length; i++) { const st = stars[i]; b.fillRect(st.x * W, st.y * H, st.r, st.r); }
+  b.globalAlpha = 1;
+}
+function drawBackground() {
+  if (!bgCv || bgCv.width !== cv.width || bgCv.height !== cv.height) buildBg();
+  ctx.drawImage(bgCv, 0, 0, W, H);
+  for (let i = 0; i < 14; i++) { // a handful of live twinklers keep the sky alive (C18)
+    const st = stars[i];
+    ctx.globalAlpha = 0.35 + 0.3 * sin(time * 2 + st.p);
     ctx.fillStyle = '#e2e8f0';
-    const sx = ((s.x + time * 0.0035 * s.r) % 1) * W; // slow parallax drift, deeper = slower
-    ctx.fillRect(sx, s.y * H, s.r, s.r);
+    const sx = ((st.x + time * 0.0035 * st.r) % 1) * W;
+    ctx.fillRect(sx, st.y * H, st.r, st.r);
   }
   ctx.globalAlpha = 1;
 }
+
 function drawEnemy(e) {
   const t = time * 3 + e.wob;
   if (e.elite) {
@@ -711,18 +830,14 @@ function drawEnemy(e) {
     ctx.save(); ctx.setLineDash([7, 9]); ctx.lineDashOffset = -time * 26;
     ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 10, 0, TAU); ctx.strokeStyle = 'rgba(250,204,21,0.55)'; ctx.lineWidth = 1.5; ctx.stroke(); ctx.restore();
   }
+  if (e.type === 'boss' && e.hp < e.maxHp * 0.25) { ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 7 + 2 * sin(time * 9), 0, TAU); ctx.strokeStyle = 'rgba(239,68,68,0.7)'; ctx.lineWidth = 2.5; ctx.stroke(); } // enrage ring (A13)
+  if (e.type === 'brute' && e.lungePh === 1) { ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 4 + 2 * sin(time * 18), 0, TAU); ctx.strokeStyle = 'rgba(248,113,113,0.85)'; ctx.lineWidth = 2; ctx.stroke(); } // lunge wind-up flash (A12)
   if (e.chill > 0) { ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 2, 0, TAU); ctx.fillStyle = 'rgba(165,243,252,0.25)'; ctx.fill(); }
-  const n = { chaser: 3, dart: 4, brute: 6, splitter: 4, mini: 3, boss: 5 }[e.type];
-  // rim spikes on the heavies
-  if (e.type === 'brute' || e.type === 'boss') {
-    const spikes = e.type === 'boss' ? 10 : 8;
-    for (let i = 0; i < spikes; i++) { const a = TAU * i / spikes + t * 0.06; poly(e.x + cos(a) * e.r * 1.04, e.y + sin(a) * e.r * 1.04, e.r * 0.22, 3, a, shade(e.col, 0.55)); }
-  }
-  // gradient body + inner counter-rotating core
-  const g = ctx.createRadialGradient(e.x - e.r * 0.3, e.y - e.r * 0.32, e.r * 0.1, e.x, e.y, e.r);
-  g.addColorStop(0, shade(e.col, 1.3)); g.addColorStop(1, shade(e.col, 0.55));
-  polyPath(e.x, e.y, e.r, n, t * 0.4); ctx.fillStyle = g; ctx.fill();
-  poly(e.x, e.y, e.r * 0.62, n, -t * 0.3, shade(e.col, 0.85));
+  const spr = foeSprite(e);
+  ctx.save(); ctx.translate(e.x, e.y); ctx.rotate(t * 0.4);
+  if (e.spawnT > 0) ctx.globalAlpha = 0.45; // still flashing in
+  ctx.drawImage(spr, -spr._css / 2, -spr._css / 2, spr._css, spr._css);
+  ctx.restore();
   // eye that tracks the player
   const ea = P ? atan2(P.y - e.y, P.x - e.x) : 0;
   const ex = e.x + cos(ea) * e.r * 0.16, ey = e.y + sin(ea) * e.r * 0.16;
@@ -733,7 +848,15 @@ function drawEnemy(e) {
     rr(e.x - e.r, e.y - e.r - 12, e.r * 2 * clamp(e.hp / e.maxHp, 0, 1), 5, 2.5, e.type === 'boss' ? '#e879f9' : '#fb923c');
   }
 }
+
 function drawPlay() {
+  for (const tg of telegraphs) { // spawn warning rings (A19)
+    const pr = 1 - tg.t / tg.max;
+    ctx.globalAlpha = 0.35 + 0.45 * pr;
+    ctx.beginPath(); ctx.arc(tg.x, tg.y, 21 - 11 * pr, 0, TAU); ctx.strokeStyle = tg.spec.col; ctx.lineWidth = 2; ctx.stroke();
+    ctx.beginPath(); ctx.arc(tg.x, tg.y, 3.5, 0, TAU); ctx.fillStyle = tg.spec.col; ctx.fill();
+    ctx.globalAlpha = 1;
+  }
   for (const pl of pools) {
     ctx.globalAlpha = 0.35 * clamp(pl.life / pl.max, 0, 1);
     ctx.beginPath(); ctx.arc(pl.x, pl.y, pl.r * (1 + 0.07 * sin(time * 11 + pl.x)), 0, TAU); ctx.fillStyle = '#f97316'; ctx.fill();
@@ -743,10 +866,11 @@ function drawPlay() {
   }
   for (const gm of gems) {
     const gy = gm.y + sin(gm.t) * 2;
-    // cheap alpha halo instead of shadowBlur (v1.5 mobile perf)
-    ctx.globalAlpha = 0.22; ctx.beginPath(); ctx.arc(gm.x, gy, 11, 0, TAU); ctx.fillStyle = '#34d399'; ctx.fill(); ctx.globalAlpha = 1;
-    poly(gm.x, gy, 6.5, 4, time * 2 + gm.t, '#34d399');
-    poly(gm.x, gy, 3, 4, time * 2 + gm.t, '#d1fae5');
+    // cheap alpha halo instead of shadowBlur (v1.5 mobile perf); bigger gems are worth more (A11)
+    const gs = 4.5 + gm.v;
+    ctx.globalAlpha = 0.22; ctx.beginPath(); ctx.arc(gm.x, gy, gs + 4.5, 0, TAU); ctx.fillStyle = '#34d399'; ctx.fill(); ctx.globalAlpha = 1;
+    poly(gm.x, gy, gs, 4, time * 2 + gm.t, '#34d399');
+    poly(gm.x, gy, gs * 0.45, 4, time * 2 + gm.t, '#d1fae5');
   }
   for (const h of hearts) {
     ctx.globalAlpha = 0.2; ctx.beginPath(); ctx.arc(h.x, h.y + sin(h.t) * 3, 15, 0, TAU); ctx.fillStyle = '#ef4444'; ctx.fill(); ctx.globalAlpha = 1;
@@ -755,7 +879,7 @@ function drawPlay() {
   }
   for (const e of enemies) drawEnemy(e);
   // projectiles + particles render additively so overlapping fire glows
-  ctx.globalCompositeOperation = 'lighter';
+  if (projs.length || parts.length) ctx.globalCompositeOperation = 'lighter'; // skip the state change when empty (C16)
   for (const pr of projs) {
     if (pr.rocket) {
       const a = atan2(pr.vy, pr.vx);
@@ -768,7 +892,7 @@ function drawPlay() {
       ctx.beginPath(); ctx.arc(pr.x, pr.y, pr.r * 0.45, 0, TAU); ctx.fillStyle = '#fff'; ctx.fill();
     }
   }
-  for (const p of parts) { ctx.globalAlpha = clamp(p.life / p.max, 0, 1); ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fillStyle = p.col; ctx.fill(); }
+  for (const p of parts) { ctx.globalAlpha = clamp(p.life / p.max, 0, 1); ctx.fillStyle = p.col; ctx.fillRect(p.x - p.r, p.y - p.r, p.r * 2, p.r * 2); } // rects beat arcs (C6)
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
   for (const r of rings) { ctx.globalAlpha = clamp(r.life / r.max, 0, 1); ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, TAU); ctx.strokeStyle = r.col; ctx.lineWidth = 2.5; ctx.stroke(); }
@@ -785,9 +909,13 @@ function drawPlay() {
   ctx.globalAlpha = 1;
   if (!(P.dashT > 0 && (time * 20 | 0) % 2)) drawTurtle(P.x, P.y, P.r, P.col, P.aim, time, P.dashT > 0);
   if (P.hurtT > 0) { ctx.beginPath(); ctx.arc(P.x, P.y, P.r + 6, 0, TAU); ctx.strokeStyle = 'rgba(248,113,113,0.7)'; ctx.lineWidth = 2; ctx.stroke(); }
+  if (dmgDir && dmgDir.t > 0) { dmgDir.t -= 0.016; ctx.beginPath(); ctx.arc(P.x, P.y, P.r + 13, dmgDir.a - 0.6, dmgDir.a + 0.6); ctx.strokeStyle = `rgba(239,68,68,${clamp(dmgDir.t, 0, 1) * 0.8})`; ctx.lineWidth = 4; ctx.stroke(); } // hit direction (A14)
+  if (P.protT > 0) { ctx.beginPath(); ctx.arc(P.x, P.y, P.r + 8 + 2 * sin(time * 8), 0, TAU); ctx.strokeStyle = 'rgba(165,243,252,0.65)'; ctx.lineWidth = 2; ctx.stroke(); } // spawn shield (A17)
+  if (P.hero === 4) { ctx.beginPath(); ctx.arc(P.x, P.y, 95, 0, TAU); ctx.strokeStyle = 'rgba(165,243,252,0.20)'; ctx.lineWidth = 1.5; ctx.stroke(); } // Cryo aura ring (A6)
   if (P.hp < P.maxHp * 0.25) { ctx.beginPath(); ctx.arc(P.x, P.y, 31 + 3 * sin(time * 6), 0, TAU); ctx.strokeStyle = `rgba(239,68,68,${0.5 + 0.3 * sin(time * 6)})`; ctx.lineWidth = 2; ctx.stroke(); }
   for (const t of texts) { ctx.globalAlpha = clamp(t.life / t.max, 0, 1); txt(t.str, t.x, t.y, t.size, t.col, 'center', true); }
   ctx.globalAlpha = 1;
+  if (banner && bannerT > 0) { const bs = bannerT > 1.3 ? 1 + (bannerT - 1.3) * 1.8 : 1; ctx.globalAlpha = clamp(bannerT / 0.5, 0, 1); txt(banner, W / 2, H * 0.3, 30 * bs, bossWave ? '#f472b6' : '#e9d5ff', 'center', true); ctx.globalAlpha = 1; } // scaling wave banner (B10)
   // touch sticks
   if (touchMode) for (const s of [joy, aim]) if (s.on) {
     ctx.beginPath(); ctx.arc(s.ox, s.oy, 52, 0, TAU); ctx.strokeStyle = 'rgba(226,232,240,0.35)'; ctx.lineWidth = 2; ctx.stroke();
@@ -797,21 +925,28 @@ function drawPlay() {
 function drawHUD() {
   const m = 14, barW = Math.min(300, W * 0.36);
   rr(m, m, barW, 16, 7, '#14532d');
+  rr(m, m, barW * clamp(P.hpGhost / P.maxHp, 0, 1), 16, 7, 'rgba(248,113,113,0.55)'); // damage ghost (B2)
   rr(m, m, barW * clamp(P.hp / P.maxHp, 0, 1), 16, 7, '#22c55e');
   rr(m, m, barW * clamp(P.hp / P.maxHp, 0, 1), 6.5, 3, 'rgba(255,255,255,0.22)');
   txt(`HP ${Math.ceil(P.hp)}/${P.maxHp}`, m + 7, m + 12.5, 11, '#fff', 'left', true);
   const xpY = m + 22;
   rr(m, xpY, barW, 9, 4, '#2e1065');
   rr(m, xpY, barW * clamp(P.xp / P.xpNext, 0, 1), 9, 4, '#34d399');
+  if (xpPulseT > 0) rr(m, xpY, barW, 9, 4, '#ffffff', (xpPulseT / 0.35) * 0.45); // level-up pulse (B3)
   rr(m, xpY, barW * clamp(P.xp / P.xpNext, 0, 1), 3.5, 1.5, 'rgba(255,255,255,0.22)');
   txt(`LV ${P.level}`, m + barW + 8, xpY + 9, 12, '#34d399', 'left', true);
   txt(`${P.xp}/${P.xpNext}`, m + barW - 4, xpY + 8, 9, '#fff', 'right');
   txt(endless ? `WAVE ${wave} ∞` : `WAVE ${wave}/${MAX_WAVE}`, W / 2, m + 16, 15, endless ? '#facc15' : '#e9d5ff', 'center', true);
+  if (state === 'play' && waveTotal > 0) { const rem = spawnLeft + enemies.length + telegraphs.length; rr(W / 2 - 60, m + 24, 120, 4, 2, '#2e1065'); rr(W / 2 - 60, m + 24, 120 * clamp(1 - rem / waveTotal, 0, 1), 4, 2, '#a78bfa'); } // wave progress (B18)
   if (P.combo >= 3) txt(`🔥 COMBO ${P.combo} ×${1 + Math.min(4, (P.combo / 10) | 0)}`, m, xpY + 30, 13, '#fb923c', 'left', true);
-  txt(`SCORE ${score}`, W - m - 52, m + 14, 13, '#fff', 'right', true);
-  txt(`💎 ${gemsRun}   ☠ ${kills}`, W - m - 52, m + 32, 11, '#a5f3fc', 'right');
+  if (P.combo >= 3) rr(m, xpY + 37, 74 * clamp(P.comboT / (P.combo >= 20 ? 3.4 : 2.5), 0, 1), 3.5, 1.75, '#fb923c'); // combo decay bar (B4)
+  txt(`SCORE ${scoreShown}`, W - m - 94, m + 14, 13, '#fff', 'right', true);
+  txt(`💎 ${gemsRun}   ☠ ${kills}`, W - m - 94, m + 32, 11 + (killPopT > 0 ? 5 * (killPopT / 0.18) : 0), '#a5f3fc', 'right', true); // kill pop (B9)
   // pause button (HUD buttons only register during live play — never under overlays)
   const hudLive = state === 'play';
+  rr(W - 88, m, 34, 34, 9, '#1e293b', 0.92);
+  txt(save.mute ? '🔇' : '🔊', W - 71, m + 23, 14, '#e9d5ff', 'center');
+  if (hudLive) regBtn(W - 88, m, 34, 34, () => { save.mute = !save.mute; if (master) master.gain.value = save.mute ? 0 : 0.5; persist(); }); // HUD mute (B14)
   rr(W - 46, m, 34, 34, 9, '#401060', 0.92);
   txt('⏸', W - 29, m + 23, 15, '#e9d5ff', 'center', true);
   if (hudLive) regBtn(W - 46, m, 34, 34, () => pauseGame());
@@ -821,11 +956,13 @@ function drawHUD() {
   txt('🚀', bx, byR + 7, 21, '#fff', 'center');
   txt('ROCKET', bx, byR - 50, 10, '#fdba74', 'center', true);
   txt('●'.repeat(P.rocketCh) + '○'.repeat(Math.max(0, P.rocketMax - P.rocketCh)), bx, byR + 52, 10, '#fb923c', 'center');
+  if (P.rocketCh < P.rocketMax) { ctx.beginPath(); ctx.arc(bx, byR, 40, -Math.PI / 2, -Math.PI / 2 + TAU * clamp(P.rocketCd / 2.2, 0, 1)); ctx.strokeStyle = 'rgba(254,240,138,0.85)'; ctx.lineWidth = 3; ctx.stroke(); } // recharge sweep (B15)
   if (hudLive) regBtn(bx - 42, byR - 42, 84, 84, () => doRocket());
   ctx.beginPath(); ctx.arc(bx, byD, 40, 0, TAU); ctx.fillStyle = 'rgba(8,145,178,0.92)'; ctx.fill();
   txt('💨', bx, byD + 7, 20, '#fff', 'center');
   txt('DASH', bx, byD + 54, 10, '#a5f3fc', 'center', true);
   txt('●'.repeat(P.dashCh) + '○'.repeat(Math.max(0, P.dashMax - P.dashCh)), bx, byD - 48, 10, '#22d3ee', 'center');
+  if (P.dashCh < P.dashMax) { ctx.beginPath(); ctx.arc(bx, byD, 40, -Math.PI / 2, -Math.PI / 2 + TAU * clamp(P.dashCd / 2.2, 0, 1)); ctx.strokeStyle = 'rgba(165,243,252,0.85)'; ctx.lineWidth = 3; ctx.stroke(); } // recharge sweep (B15)
   if (hudLive) regBtn(bx - 42, byD - 42, 84, 84, () => doDash());
   // boss bar (bottom, clear of the buttons)
   if (bossRef) {
@@ -833,6 +970,7 @@ function drawHUD() {
     txt('☠ ABYSS WARDEN ☠', W / 2, H - 34, 12, '#f472b6', 'center', true);
     rr(W / 2 - bw / 2, H - 28, bw, 9, 4, '#3b0764');
     rr(W / 2 - bw / 2, H - 28, bw * clamp(bossRef.hp / bossRef.maxHp, 0, 1), 9, 4, '#e879f9');
+    txt(`${Math.ceil(bossRef.hp)} / ${Math.round(bossRef.maxHp)}`, W / 2, H - 8, 9.5, '#f9a8d4', 'center'); // boss HP numbers (B5)
   }
 }
 function bigButton(x, y, w, h, label, col, fn) {
@@ -849,9 +987,11 @@ function drawMenu() {
   grad.addColorStop(0, '#facc15'); grad.addColorStop(0.5, '#4ade80'); grad.addColorStop(1, '#22d3ee');
   ctx.font = '800 44px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = grad;
   ctx.fillText('GEMSTORM', cx, 208);
+  lastFont = '';
   txt('💎 N E O N   A B Y S S 💎', cx, 234, 15, '#e879f9', 'center', true);
   txt('20 waves. Bosses. Loot. Survive the storm.', cx, 262, 13, '#cbd5e1', 'center');
-  txt(`💎 Bank: ${save.bank}   🏆 Best: ${save.best}   🌊 Best wave: ${save.bestWave}   👑 Victories: ${save.victories}`, cx, 288, 12.5, '#94a3b8', 'center');
+  txt(`💎 Bank: ${save.bank}   🏆 Best: ${save.best}   🌊 Best wave: ${save.bestWave}   👑 Victories: ${save.victories}${W >= 760 && save.bestCombo ? `   🔥 Best combo: ${save.bestCombo}` : ''}`, cx, 288, 12.5, '#94a3b8', 'center');
+  ctx.globalAlpha = 0.35 + 0.25 * sin(time * 2.6); ctx.strokeStyle = '#4ade80'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.roundRect(cx - 155, 301, 310, 64, 17); ctx.stroke(); ctx.globalAlpha = 1; // ENTER pulse (B8)
   bigButton(cx - 150, 306, 300, 54, '▶  ENTER THE ABYSS', '#16a34a', () => startRun());
   // settings gear, top-right corner
   rr(W - 58, 14, 44, 44, 11, '#1e293b');
@@ -863,9 +1003,9 @@ function drawMenu() {
   HEROES.forEach((h, i) => {
     const x = hx0 + i * (hw + 6), y = 402, owned = (save.unlocks >> i & 1) === 1;
     rr(x, y, hw, 56, 10, save.hero === i ? '#1e3a5f' : '#141b30');
-    if (save.hero === i) { ctx.strokeStyle = h.col; ctx.lineWidth = 2; ctx.beginPath(); ctx.roundRect(x, y, hw, 56, 10); ctx.stroke(); }
+    if (save.hero === i) { ctx.globalAlpha = 0.65 + 0.35 * sin(time * 3); ctx.strokeStyle = h.col; ctx.lineWidth = 2; ctx.beginPath(); ctx.roundRect(x, y, hw, 56, 10); ctx.stroke(); ctx.globalAlpha = 1; } // selected chip pulse (B7)
     drawTurtle(x + hw / 2, y + 19, 11, h.col, -Math.PI / 2, time + i, false);
-    txt(h.name.replace('💎N🎱 ', 'N🎱 '), x + hw / 2, y + 42, 10.5, '#fff', 'center', true);
+    txt(h.name, x + hw / 2, y + 42, 10.5, '#fff', 'center', true);
     txt(owned ? (save.hero === i ? 'EQUIPPED' : 'OWNED') : `💎 ${h.cost}`, x + hw / 2, y + 53, 8.5, owned ? '#4ade80' : '#facc15', 'center', true);
     regBtn(x, y, hw, 56, () => {
       if (owned) { save.hero = i; }
@@ -901,7 +1041,7 @@ function drawMenu() {
   rr(tx0 + (chw + chGap) * 2, ty, chw, 34, 9, '#1e293b');
   txt('⛶ Fullscreen (F)', tx0 + chw * 2.5 + chGap * 2, ty + 22, 12, '#fff', 'center', true);
   regBtn(tx0 + (chw + chGap) * 2, ty, chw, 34, () => toggleFullscreen());
-  txt('Web Edition v1.5 — the core Abyss in your browser · manual aim · harder defaults', cx, H - 26, 11, '#64748b', 'center');
+  txt('Web Edition v1.6 — the core Abyss in your browser · manual aim · harder defaults', cx, H - 26, 11, '#64748b', 'center');
   for (const t of texts) { ctx.globalAlpha = clamp(t.life / t.max, 0, 1); txt(t.str, t.x, t.y, t.size, t.col, 'center', true); }
   ctx.globalAlpha = 1;
 }
@@ -912,6 +1052,8 @@ function drawDraft() {
   const cw = Math.min(210, (W - 48) / 3), ch = 150, x0 = W / 2 - (cw * 3 + 24) / 2, y = H * 0.42;
   draftChoices.forEach((u, i) => {
     const x = x0 + i * (cw + 12);
+    const appear = clamp((time - draftT - i * 0.07) / 0.22, 0, 1); // staggered entrance (B6)
+    ctx.save(); ctx.translate(0, (1 - appear) * 34); ctx.globalAlpha = 0.25 + 0.75 * appear;
     rr(x, y, cw, ch, 14, '#1e293b');
     ctx.strokeStyle = '#facc15'; ctx.lineWidth = 2; ctx.beginPath(); ctx.roundRect(x, y, cw, ch, 14); ctx.stroke();
     txt(u.icon, x + cw / 2, y + 52, 34, '#fff', 'center');
@@ -919,13 +1061,17 @@ function drawDraft() {
     txt((i + 1) + '', x + cw / 2, y + 122, 12, '#94a3b8', 'center');
     if ((P.stacks[u.id] || 0) > 0) txt(`owned ×${P.stacks[u.id]}`, x + cw / 2, y + 140, 10, '#4ade80', 'center');
     regBtn(x, y, cw, ch, () => applyUpgrade(u));
+    ctx.restore();
   });
 }
 function drawEnd(won) {
   ctx.fillStyle = 'rgba(4,2,12,0.8)'; ctx.fillRect(0, 0, W, H);
+  for (const c of confetti) { ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.rot); ctx.fillStyle = c.col; ctx.fillRect(-4, -2.5, 8, 5); ctx.restore(); } // victory confetti (A21)
   txt(won ? '👑 VICTORY! 👑' : '💀 THE ABYSS CLAIMS YOU', W / 2, H * 0.3, 32, won ? '#facc15' : '#f87171', 'center', true);
   txt(`Score ${score} · Wave ${wave} · Kills ${kills}`, W / 2, H * 0.3 + 38, 16, '#e2e8f0', 'center');
   txt(`💎 +${gemsRun} banked (total ${save.bank}) · Best combo ×${P.comboBest}`, W / 2, H * 0.3 + 64, 13, '#94a3b8', 'center');
+  if (newBest) txt('🏆 NEW BEST SCORE!', W / 2, H * 0.3 + 88, 14, '#facc15', 'center', true);
+  txt(`⏱ ${fmtT(runTime)} · LV ${P.level} reached`, W / 2, H * 0.3 + (newBest ? 110 : 88), 12, '#64748b', 'center'); // end stats (B12)
   const cx = W / 2, y = H * 0.48;
   if (won) bigButton(cx - 150, y, 300, 50, '🌊 KEEP GOING — ENDLESS', '#7c3aed', () => { endless = true; state = 'play'; nextWave(); });
   bigButton(cx - 150, y + (won ? 62 : 0), 300, 50, '▶  PLAY AGAIN  (R)', '#16a34a', () => startRun());
@@ -934,6 +1080,7 @@ function drawEnd(won) {
 function drawPause() {
   ctx.fillStyle = 'rgba(4,2,12,0.72)'; ctx.fillRect(0, 0, W, H);
   txt('⏸ PAUSED', W / 2, H * 0.36, 30, '#e9d5ff', 'center', true);
+  txt(`Score ${score} · Wave ${wave} · ☠ ${kills} · ⏱ ${fmtT(runTime)}`, W / 2, H * 0.36 + 30, 13, '#94a3b8', 'center'); // pause stats (B11)
   bigButton(W / 2 - 130, H * 0.44, 260, 50, '▶  RESUME', '#16a34a', () => resumeGame());
   bigButton(W / 2 - 130, H * 0.44 + 62, 260, 50, '⚙  SETTINGS', '#475569', () => { settingsFrom = 'pause'; state = 'settings'; });
   bigButton(W / 2 - 130, H * 0.44 + 124, 260, 50, '🏠  QUIT TO MENU', '#334155', () => { bankRun(); state = 'menu'; });
@@ -947,6 +1094,7 @@ function drawSettings() {
     ['☠️ Hard Mode — tougher foes, better loot', save.hard, () => { save.hard = !save.hard; persist(); }],
     ['🔊 Sound & Music', !save.mute, () => { save.mute = !save.mute; if (master) master.gain.value = save.mute ? 0 : 0.5; persist(); }],
     ['📳 Screen Shake', save.shake, () => { save.shake = !save.shake; persist(); }],
+    ['✨ Effects — particles & flair', save.fx, () => { save.fx = !save.fx; persist(); }],
   ];
   rows.forEach(([label, on, fn], i) => {
     const w = Math.min(440, W - 40), x = W / 2 - w / 2, y = H * 0.34 + i * 58;
@@ -956,8 +1104,8 @@ function drawSettings() {
     txt(on ? 'ON' : 'OFF', x + w - 47, y + 29, 12.5, '#fff', 'center', true);
     regBtn(x, y, w, 46, fn);
   });
-  bigButton(W / 2 - 110, H * 0.34 + 3 * 58 + 10, 220, 48, '✔  DONE', '#334155', () => { state = settingsFrom; });
-  txt('Aim is always manual in the Web Edition — same as your Android settings.', W / 2, H * 0.34 + 3 * 58 + 84, 11.5, '#64748b', 'center');
+  bigButton(W / 2 - 110, H * 0.34 + rows.length * 58 + 10, 220, 48, '✔  DONE', '#334155', () => { state = settingsFrom; });
+  txt('Aim is always manual in the Web Edition — same as your Android settings.', W / 2, H * 0.34 + rows.length * 58 + 84, 11.5, '#64748b', 'center');
 }
 function draw() {
   btns = [];
@@ -982,6 +1130,11 @@ function draw() {
   const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.42, W / 2, H / 2, Math.max(W, H) * 0.78);
   vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(2,0,10,0.48)');
   ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  if (P && state !== 'menu' && P.hp > 0 && P.hp < P.maxHp * 0.25) { // low-HP pulse (B16)
+    const rg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.36, W / 2, H / 2, Math.max(W, H) * 0.75);
+    rg.addColorStop(0, 'rgba(220,38,38,0)'); rg.addColorStop(1, `rgba(220,38,38,${0.16 + 0.1 * sin(time * 6)})`);
+    ctx.fillStyle = rg; ctx.fillRect(0, 0, W, H);
+  }
 }
 /* ---------------- main loop (with the v2.7 frame safety net) ---------------- */
 function loop(ts) {
@@ -992,6 +1145,15 @@ function loop(ts) {
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
+const HINTS = [
+  '<b>WASD / arrows</b> move · <b>mouse</b> aim (auto-fire) · <b>Space / Shift</b> dash · <b>Right-click / E</b> rocket · <b>P / Esc</b> pause · touch: dual sticks',
+  '💡 Dashing makes you untouchable — ram straight through the swarm',
+  '💡 Rockets blow up on the board edge too — bank shots count',
+  '💡 Red hearts are rare — but a boss always drops one',
+  '💡 Level-ups vacuum every gem on the field — save one for a crowd',
+];
+let hintI = 0;
+setInterval(() => { hintI = (hintI + 1) % HINTS.length; const el = document.getElementById('hint'); if (el) el.innerHTML = HINTS[hintI]; }, 7000);
 function toggleFullscreen() {
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   else document.documentElement.requestFullscreen().catch(() => {});
@@ -1013,7 +1175,7 @@ function pcFocusLost() {
   if (state === 'play') pauseGame();
 }
 addEventListener('blur', pcFocusLost);
-document.addEventListener('visibilitychange', () => { if (document.hidden) pcFocusLost(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { pcFocusLost(); if (AC && AC.state === 'running') AC.suspend().catch(() => {}); } else if (AC && AC.state === 'suspended' && !save.mute) AC.resume().catch(() => {}); });
 </script>
 </body>
 </html>
