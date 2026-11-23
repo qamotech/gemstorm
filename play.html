@@ -651,12 +651,10 @@ function drawTurtle(x, y, r, col, aimA, t, dashing, detail) {
     ctx.beginPath(); ctx.arc(jx, jy, r * 0.17, 0, TAU); ctx.fillStyle = '#475569'; ctx.fill();
     ctx.beginPath(); ctx.arc(jx, jy, r * 0.1, 0, TAU); ctx.fillStyle = '#1e293b'; ctx.fill();
   }
-  // shell: radial gradient with a neon rim glow
-  if (detail) { ctx.save(); ctx.shadowColor = col; ctx.shadowBlur = 16; }
+  // shell: radial gradient (v1.5: shadow-blur rim glow REMOVED — sparkles off the main units, and shadowBlur is what chokes mobile GPUs)
   const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.15, x, y, r);
   g.addColorStop(0, shade(col, 1.3)); g.addColorStop(0.55, col); g.addColorStop(1, shade(col, 0.45));
   ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fillStyle = g; ctx.fill();
-  if (detail) ctx.restore();
   // rim ring + scute ticks
   ctx.beginPath(); ctx.arc(x, y, r * 0.96, 0, TAU); ctx.strokeStyle = shade(col, 0.5); ctx.lineWidth = r * 0.09; ctx.stroke();
   ctx.strokeStyle = 'rgba(0,0,0,0.28)'; ctx.lineWidth = 1.4; ctx.beginPath();
@@ -670,11 +668,8 @@ function drawTurtle(x, y, r, col, aimA, t, dashing, detail) {
     ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1.4; ctx.stroke();
   }
   poly(x, y, r * 0.33, 6, t * 0.05, shade(col, 1.12));
-  // center gem
-  poly(x, y, r * 0.17, 4, t * 1.5, '#ffffff');
-  poly(x, y, r * 0.1, 4, t * 1.5, col);
-  // specular sheen
-  if (detail) { ctx.beginPath(); ctx.ellipse(x - r * 0.38, y - r * 0.48, r * 0.34, r * 0.15, -0.6, 0, TAU); ctx.fillStyle = 'rgba(255,255,255,0.20)'; ctx.fill(); }
+  // center gem — small and matte (v1.5: the white sparkle diamond is gone)
+  poly(x, y, r * 0.11, 4, t * 1.5, shade(col, 1.3));
   // blaster nub on the aim side
   const bx = x + cos(aimA) * r, by = y + sin(aimA) * r;
   ctx.beginPath(); ctx.arc(bx, by, r * 0.16, 0, TAU); ctx.fillStyle = '#334155'; ctx.fill();
@@ -748,13 +743,14 @@ function drawPlay() {
   }
   for (const gm of gems) {
     const gy = gm.y + sin(gm.t) * 2;
-    ctx.save(); ctx.shadowColor = '#34d399'; ctx.shadowBlur = 11;
-    poly(gm.x, gy, 6.5, 4, time * 2 + gm.t, '#34d399'); ctx.restore();
+    // cheap alpha halo instead of shadowBlur (v1.5 mobile perf)
+    ctx.globalAlpha = 0.22; ctx.beginPath(); ctx.arc(gm.x, gy, 11, 0, TAU); ctx.fillStyle = '#34d399'; ctx.fill(); ctx.globalAlpha = 1;
+    poly(gm.x, gy, 6.5, 4, time * 2 + gm.t, '#34d399');
     poly(gm.x, gy, 3, 4, time * 2 + gm.t, '#d1fae5');
   }
   for (const h of hearts) {
-    ctx.save(); ctx.shadowColor = '#ef4444'; ctx.shadowBlur = 12;
-    drawHeart(h.x, h.y + sin(h.t) * 3, 10 + sin(h.t) * 1.5, '#ef4444'); ctx.restore();
+    ctx.globalAlpha = 0.2; ctx.beginPath(); ctx.arc(h.x, h.y + sin(h.t) * 3, 15, 0, TAU); ctx.fillStyle = '#ef4444'; ctx.fill(); ctx.globalAlpha = 1;
+    drawHeart(h.x, h.y + sin(h.t) * 3, 10 + sin(h.t) * 1.5, '#ef4444');
     ctx.beginPath(); ctx.arc(h.x - 3.5, h.y - 3.5 + sin(h.t) * 3, 2.2, 0, TAU); ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.fill();
   }
   for (const e of enemies) drawEnemy(e);
@@ -767,8 +763,8 @@ function drawPlay() {
       poly(pr.x - cos(a) * 8, pr.y - sin(a) * 8, 5.5, 3, a + Math.PI, '#fef08a');
       ctx.beginPath(); ctx.arc(pr.x + cos(a) * 6, pr.y + sin(a) * 6, 3, 0, TAU); ctx.fillStyle = '#fff'; ctx.fill();
     } else {
-      ctx.save(); ctx.shadowColor = pr.col; ctx.shadowBlur = 9;
-      ctx.beginPath(); ctx.arc(pr.x, pr.y, pr.r, 0, TAU); ctx.fillStyle = pr.col; ctx.fill(); ctx.restore();
+      ctx.globalAlpha = 0.25; ctx.beginPath(); ctx.arc(pr.x, pr.y, pr.r * 2.1, 0, TAU); ctx.fillStyle = pr.col; ctx.fill(); ctx.globalAlpha = 1;
+      ctx.beginPath(); ctx.arc(pr.x, pr.y, pr.r, 0, TAU); ctx.fillStyle = pr.col; ctx.fill();
       ctx.beginPath(); ctx.arc(pr.x, pr.y, pr.r * 0.45, 0, TAU); ctx.fillStyle = '#fff'; ctx.fill();
     }
   }
@@ -905,7 +901,7 @@ function drawMenu() {
   rr(tx0 + (chw + chGap) * 2, ty, chw, 34, 9, '#1e293b');
   txt('⛶ Fullscreen (F)', tx0 + chw * 2.5 + chGap * 2, ty + 22, 12, '#fff', 'center', true);
   regBtn(tx0 + (chw + chGap) * 2, ty, chw, 34, () => toggleFullscreen());
-  txt('Web Edition v1.4 — the core Abyss in your browser · manual aim · harder defaults', cx, H - 26, 11, '#64748b', 'center');
+  txt('Web Edition v1.5 — the core Abyss in your browser · manual aim · harder defaults', cx, H - 26, 11, '#64748b', 'center');
   for (const t of texts) { ctx.globalAlpha = clamp(t.life / t.max, 0, 1); txt(t.str, t.x, t.y, t.size, t.col, 'center', true); }
   ctx.globalAlpha = 1;
 }
