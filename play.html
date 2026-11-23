@@ -50,7 +50,7 @@ const shade = (hex, f) => {
 /* ---------------- save (localStorage) ---------------- */
 const SKEY = 'gemstorm_web_save_v1';
 let save = { bank: 0, best: 0, bestWave: 0, victories: 0, kills: 0,
-  unlocks: 1, hero: 0, weapon: 0, wunlocks: 1, hard: true, mute: false };
+  unlocks: 1, hero: 0, weapon: 0, wunlocks: 1, hard: true, mute: false, shake: true };
 try { const s = JSON.parse(localStorage.getItem(SKEY) || 'null'); if (s && typeof s === 'object') save = Object.assign(save, s); } catch (e) { /* fresh save */ }
 function persist() { try { localStorage.setItem(SKEY, JSON.stringify(save)); } catch (e) { /* private mode */ } }
 
@@ -201,6 +201,7 @@ let time = 0, lastTs = 0;
 let enemies = [], projs = [], gems = [], parts = [], texts = [], rings = [], pools = [], hearts = [], ghosts = [];
 let P = null, wave = 0, score = 0, kills = 0, gemsRun = 0, runTime = 0;
 let spawnLeft = 0, spawnTimer = 0, waveState = 'intro', waveT = 0, bossRef = null, bossWave = false, bossSpawned = false, gemsBanked = false;
+let endT = -9, pauseT = -9; // click-guard timestamps for end / pause screens
 let shake = 0, hitstop = 0, draftChoices = [], endless = false, victoryBanked = false;
 const MAX_WAVE = 20;
 
@@ -340,16 +341,19 @@ function doRocket() {
   rings.push({ x: P.x, y: P.y, r: 6, life: 0.3, max: 0.3, col: '#fb923c' });
   sfx.rocket();
 }
-function endRun(won) {
-  state = won ? 'win' : 'over';
-  shake = 0;
-  if (won && !victoryBanked) { victoryBanked = true; save.victories++; }
+function bankRun() {
   if (!gemsBanked) { gemsBanked = true; save.bank += gemsRun; save.kills += kills; }
   if (score > save.best) save.best = score;
   if (wave > save.bestWave) save.bestWave = wave;
   persist();
 }
-function pauseGame() { if (state === 'play') state = 'pause'; }
+function endRun(won) {
+  state = won ? 'win' : 'over';
+  shake = 0; endT = time;
+  if (won && !victoryBanked) { victoryBanked = true; save.victories++; }
+  bankRun();
+}
+function pauseGame() { if (state === 'play') { state = 'pause'; pauseT = time; } }
 function resumeGame() { if (state === 'pause') state = 'play'; }
 
 /* ---------------- update ---------------- */
@@ -526,6 +530,10 @@ const stars = Array.from({ length: 90 }, () => ({ x: Math.random(), y: Math.rand
 let btns = [];
 function regBtn(x, y, w, h, fn) { btns.push({ x, y, w, h, fn }); }
 function handleClick(x, y) {
+  // click guards: a screen that JUST appeared can't be clicked through by a
+  // gameplay click that was already in flight (v1.3 — the "sudden exit" fix)
+  if ((state === 'over' || state === 'win') && time - endT < 0.9) return;
+  if (state === 'pause' && time - pauseT < 0.35) return;
   for (let i = btns.length - 1; i >= 0; i--) {
     const b = btns[i];
     if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { audioInit(); sfx.click(); b.fn(); return; }
@@ -741,22 +749,23 @@ function drawHUD() {
   if (P.combo >= 3) txt(`🔥 COMBO ${P.combo} ×${1 + Math.min(4, (P.combo / 10) | 0)}`, m, xpY + 30, 13, '#fb923c', 'left', true);
   txt(`SCORE ${score}`, W - m - 52, m + 14, 13, '#fff', 'right', true);
   txt(`💎 ${gemsRun}   ☠ ${kills}`, W - m - 52, m + 32, 11, '#a5f3fc', 'right');
-  // pause button
+  // pause button (HUD buttons only register during live play — never under overlays)
+  const hudLive = state === 'play';
   rr(W - 46, m, 34, 34, 9, '#401060', 0.92);
   txt('⏸', W - 29, m + 23, 15, '#e9d5ff', 'center', true);
-  regBtn(W - 46, m, 34, 34, () => pauseGame());
+  if (hudLive) regBtn(W - 46, m, 34, 34, () => pauseGame());
   // dash / rocket buttons (touch + mouse)
   const bx = W - 66, byR = H - 178, byD = H - 92;
   ctx.beginPath(); ctx.arc(bx, byR, 40, 0, TAU); ctx.fillStyle = 'rgba(194,65,12,0.92)'; ctx.fill();
   txt('🚀', bx, byR + 7, 21, '#fff', 'center');
   txt('ROCKET', bx, byR - 50, 10, '#fdba74', 'center', true);
   txt('●'.repeat(P.rocketCh) + '○'.repeat(Math.max(0, P.rocketMax - P.rocketCh)), bx, byR + 52, 10, '#fb923c', 'center');
-  regBtn(bx - 42, byR - 42, 84, 84, () => doRocket());
+  if (hudLive) regBtn(bx - 42, byR - 42, 84, 84, () => doRocket());
   ctx.beginPath(); ctx.arc(bx, byD, 40, 0, TAU); ctx.fillStyle = 'rgba(8,145,178,0.92)'; ctx.fill();
   txt('💨', bx, byD + 7, 20, '#fff', 'center');
   txt('DASH', bx, byD + 54, 10, '#a5f3fc', 'center', true);
   txt('●'.repeat(P.dashCh) + '○'.repeat(Math.max(0, P.dashMax - P.dashCh)), bx, byD - 48, 10, '#22d3ee', 'center');
-  regBtn(bx - 42, byD - 42, 84, 84, () => doDash());
+  if (hudLive) regBtn(bx - 42, byD - 42, 84, 84, () => doDash());
   // boss bar (bottom, clear of the buttons)
   if (bossRef) {
     const bw = Math.min(520, W * 0.6);
@@ -783,6 +792,10 @@ function drawMenu() {
   txt('20 waves. Bosses. Loot. Survive the storm.', cx, 262, 13, '#cbd5e1', 'center');
   txt(`💎 Bank: ${save.bank}   🏆 Best: ${save.best}   🌊 Best wave: ${save.bestWave}   👑 Victories: ${save.victories}`, cx, 288, 12.5, '#94a3b8', 'center');
   bigButton(cx - 150, 306, 300, 54, '▶  ENTER THE ABYSS', '#16a34a', () => startRun());
+  // settings gear, top-right corner
+  rr(W - 58, 14, 44, 44, 11, '#1e293b');
+  txt('⚙', W - 36, 44, 21, '#e9d5ff', 'center');
+  regBtn(W - 58, 14, 44, 44, () => { settingsFrom = 'menu'; state = 'settings'; });
   // hero chips
   txt('HERO — tap to select / buy', cx, 392, 12, '#94a3b8', 'center', true);
   const hw = Math.min(104, (W - 40) / 6 - 6), hx0 = cx - (hw + 6) * 3 + 3;
@@ -827,7 +840,7 @@ function drawMenu() {
   rr(tx0 + (chw + chGap) * 2, ty, chw, 34, 9, '#1e293b');
   txt('⛶ Fullscreen (F)', tx0 + chw * 2.5 + chGap * 2, ty + 22, 12, '#fff', 'center', true);
   regBtn(tx0 + (chw + chGap) * 2, ty, chw, 34, () => toggleFullscreen());
-  txt('Web Edition v1.2 — the core Abyss in your browser · manual aim · harder defaults', cx, H - 26, 11, '#64748b', 'center');
+  txt('Web Edition v1.3 — the core Abyss in your browser · manual aim · harder defaults', cx, H - 26, 11, '#64748b', 'center');
   for (const t of texts) { ctx.globalAlpha = clamp(t.life / t.max, 0, 1); txt(t.str, t.x, t.y, t.size, t.col, 'center', true); }
   ctx.globalAlpha = 1;
 }
@@ -861,14 +874,40 @@ function drawPause() {
   ctx.fillStyle = 'rgba(4,2,12,0.72)'; ctx.fillRect(0, 0, W, H);
   txt('⏸ PAUSED', W / 2, H * 0.36, 30, '#e9d5ff', 'center', true);
   bigButton(W / 2 - 130, H * 0.44, 260, 50, '▶  RESUME', '#16a34a', () => resumeGame());
-  bigButton(W / 2 - 130, H * 0.44 + 62, 260, 50, '🏠  QUIT TO MENU', '#334155', () => { state = 'menu'; });
+  bigButton(W / 2 - 130, H * 0.44 + 62, 260, 50, '⚙  SETTINGS', '#475569', () => { settingsFrom = 'pause'; state = 'settings'; });
+  bigButton(W / 2 - 130, H * 0.44 + 124, 260, 50, '🏠  QUIT TO MENU', '#334155', () => { bankRun(); state = 'menu'; });
+  txt('Quitting banks this run\'s gems — nothing is lost', W / 2, H * 0.44 + 196, 11.5, '#94a3b8', 'center');
+}
+let settingsFrom = 'menu';
+function drawSettings() {
+  ctx.fillStyle = 'rgba(4,2,12,0.85)'; ctx.fillRect(0, 0, W, H);
+  txt('⚙ SETTINGS', W / 2, H * 0.26, 30, '#e9d5ff', 'center', true);
+  const rows = [
+    ['☠️ Hard Mode — tougher foes, better loot', save.hard, () => { save.hard = !save.hard; persist(); }],
+    ['🔊 Sound & Music', !save.mute, () => { save.mute = !save.mute; if (master) master.gain.value = save.mute ? 0 : 0.5; persist(); }],
+    ['📳 Screen Shake', save.shake, () => { save.shake = !save.shake; persist(); }],
+  ];
+  rows.forEach(([label, on, fn], i) => {
+    const w = Math.min(440, W - 40), x = W / 2 - w / 2, y = H * 0.34 + i * 58;
+    rr(x, y, w, 46, 11, '#1e293b');
+    txt(label, x + 16, y + 29, 13.5, '#e2e8f0', 'left', true);
+    rr(x + w - 78, y + 8, 62, 30, 15, on ? '#16a34a' : '#475569');
+    txt(on ? 'ON' : 'OFF', x + w - 47, y + 29, 12.5, '#fff', 'center', true);
+    regBtn(x, y, w, 46, fn);
+  });
+  bigButton(W / 2 - 110, H * 0.34 + 3 * 58 + 10, 220, 48, '✔  DONE', '#334155', () => { state = settingsFrom; });
+  txt('Aim is always manual in the Web Edition — same as your Android settings.', W / 2, H * 0.34 + 3 * 58 + 84, 11.5, '#64748b', 'center');
 }
 function draw() {
   btns = [];
   ctx.save();
-  if (shake > 0 && state === 'play') ctx.translate(rnd(-shake, shake) * 0.5, rnd(-shake, shake) * 0.5);
+  if (shake > 0 && state === 'play' && save.shake) ctx.translate(rnd(-shake, shake) * 0.5, rnd(-shake, shake) * 0.5);
   drawBackground();
   if (state === 'menu') drawMenu();
+  else if (state === 'settings') {
+    if (settingsFrom === 'pause' && P) drawPlay();
+    drawSettings();
+  }
   else {
     drawPlay();
     drawHUD();
@@ -897,6 +936,7 @@ function toggleFullscreen() {
   else document.documentElement.requestFullscreen().catch(() => {});
 }
 addEventListener('keydown', e => {
+  if (state === 'settings' && (e.key === 'Escape' || e.key.toLowerCase() === 'p')) { state = settingsFrom; return; }
   if (state === 'draft') {
     const n = parseInt(e.key, 10);
     if (n >= 1 && n <= 3 && draftChoices[n - 1]) applyUpgrade(draftChoices[n - 1]);
